@@ -829,6 +829,8 @@ function renderHomeMatchPicksSection() {
 
         ${matchLine(match)}
 
+        ${renderHomeFinishedMatchDetails(match)}
+
         ${roundClosed
           ? `<div class="player-picks">
               ${DATA.players.map((player) => {
@@ -847,6 +849,31 @@ function renderHomeMatchPicksSection() {
         }
       </div>
     </section>
+  `;
+}
+
+function renderHomeFinishedMatchDetails(match) {
+  if (!isFinishedStatus(match)) {
+    return "";
+  }
+
+  const events = liveMatchEvents(match);
+  const statistics = liveMatchStatistics(match);
+
+  if (!events.length && !statistics) {
+    return "";
+  }
+
+  return `
+    <div class="home-finished-match-details">
+      ${events.length ? `
+        <div class="finished-events-title">Eventos</div>
+        <div class="live-event-list finished-goals-aligned">
+          ${events.map((event) => liveEventRow(event, match)).join("")}
+        </div>
+      ` : ""}
+      ${statistics}
+    </div>
   `;
 }
 
