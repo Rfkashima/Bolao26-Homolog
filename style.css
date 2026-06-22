@@ -2255,17 +2255,46 @@ iframe{
   }
 }
 
-.unresolved-flag-options{
-  flex-wrap: wrap;
-  max-width: 132px;
-  gap: 3px;
+/* Ajustes homologação: 4 abas e Inicio sem ranking */
+.main-tabs{
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
 }
 
-.compact-game-main > span:last-child .unresolved-flag-options,
-.compact-game-main > .unresolved-flag-options:last-child{
-  justify-content: flex-end;
+.main-tabs button[data-view="ranking"]::before{
+  content: "🏆";
+}
+
+.main-tabs button[data-view="oficial"]::before{
+  content: "📋";
+}
+
+@media (min-width: 900px){
+  .main-tabs{
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
 }
 
 .home-finished-match-details{
   margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(0,167,255,.18);
+}
+
+.ranking-page-card{
+  width: 100%;
+}
+
+.compact-country-flags-only{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.compact-country-flags-only .flag-sprite,
+.compact-country-placeholder .flag-sprite,
+.compact-country-placeholder .flag-fallback{
+  margin: 0;
 }
