@@ -720,10 +720,18 @@ function renderRanking() {
 
   app.innerHTML = `
     <div class="stack">
-      <section class="card ranking-page-card">
+      <section class="card ranking-current-card">
         <div class="title-row">
           <h2>🏆 Ranking dos players</h2>
-          <span class="kicker">Variação por jogo</span>
+          <span class="kicker">Classificação atual</span>
+        </div>
+        ${rankingTable(calculateRanking())}
+      </section>
+
+      <section class="card ranking-page-card">
+        <div class="title-row">
+          <h2>📈 Variação de posições</h2>
+          <span class="kicker">Por jogo</span>
         </div>
 
         <div class="ranking-filter-buttons" role="group" aria-label="Período do gráfico de ranking">
@@ -734,14 +742,6 @@ function renderRanking() {
         </div>
 
         ${renderRankingEvolutionChart(state.rankingRange)}
-      </section>
-
-      <section class="card ranking-current-card">
-        <div class="title-row">
-          <h2>📋 Classificação atual</h2>
-          <span class="kicker">Pontuação acumulada</span>
-        </div>
-        ${rankingTable(calculateRanking())}
       </section>
 
       ${renderSponsorBlock(true)}
