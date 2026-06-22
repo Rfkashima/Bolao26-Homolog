@@ -5,8 +5,8 @@ window.BOLAO_DATA = {
     "resultPoints": 1,
     "entryFee": 20.0,
     "prizeWinners": 4,
-    "lockHoursBeforeRound": 2,
-    "showPicksBeforeDeadline": true,
+    "lockHoursBeforeRound": 0.25,
+    "showPicksBeforeDeadline": false,
     "apiUrl": "https://script.google.com/macros/s/AKfycbyznSo37nnchBRTJNl49gZoE5Q0w8jpb_fvLS12dK0ll7RjQcSv2mzYNfjMiC-BLGWa_g/exec"
   },
   "players": [

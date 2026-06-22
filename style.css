@@ -79,7 +79,7 @@ input{
 
 .main-tabs{
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   margin-top: 6px;
 }
@@ -111,7 +111,7 @@ input{
   z-index: 999;
   width: 100%;
   margin: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   padding: 8px clamp(10px, 4vw, 220px) max(8px, env(safe-area-inset-bottom));
   border-top: 1px solid rgba(203,213,225,.92);
@@ -142,8 +142,12 @@ input{
   content: "🏠";
 }
 
-.main-tabs button[data-view="oficial"]::before{
+.main-tabs button[data-view="ranking"]::before{
   content: "🏆";
+}
+
+.main-tabs button[data-view="oficial"]::before{
+  content: "🌎";
 }
 
 .main-tabs button[data-view="palpites"]::before{
@@ -878,7 +882,7 @@ tr:last-child td{
 
 @media (min-width: 1080px) {
   .group-grid{
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .stat-grid{
@@ -902,7 +906,7 @@ tr:last-child td{
   z-index: 999 !important;
   width: 100% !important;
   display: grid !important;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
   gap: 8px !important;
   margin: 0 !important;
   padding: 8px clamp(10px, 4vw, 220px) max(8px, env(safe-area-inset-bottom)) !important;
@@ -941,11 +945,16 @@ tr:last-child td{
 }
 
 .main-tabs button[data-view="inicio"]::before{ content: "🏠"; }
-.main-tabs button[data-view="oficial"]::before{ content: "🏆"; }
+.main-tabs button[data-view="ranking"]::before{ content: "🏆"; }
+.main-tabs button[data-view="oficial"]::before{ content: "🌎"; }
 .main-tabs button[data-view="palpites"]::before{ content: "📝"; }
 
 .main-tabs button[data-view="inicio"]{
   border-color: rgba(34,255,74,.36) !important;
+}
+
+.main-tabs button[data-view="ranking"]{
+  border-color: rgba(255,211,0,.42) !important;
 }
 
 .main-tabs button[data-view="oficial"]{
@@ -959,6 +968,11 @@ tr:last-child td{
 .main-tabs button[data-view="inicio"].active{
   background: linear-gradient(135deg, rgba(34,255,74,.95), rgba(0,135,58,.95)) !important;
   color: #001408 !important;
+}
+
+.main-tabs button[data-view="ranking"].active{
+  background: linear-gradient(135deg, rgba(255,211,0,.98), rgba(214,126,0,.95)) !important;
+  color: #160d00 !important;
 }
 
 .main-tabs button[data-view="oficial"].active{
@@ -2254,3 +2268,6 @@ iframe{
     overscroll-behavior-x: contain;
   }
 }
+
+.compact-country-flags-only{ gap: 4px; justify-content: center; }
+.knockout-or{ font-size: 9px; font-weight: 950; opacity: .72; text-transform: uppercase; }

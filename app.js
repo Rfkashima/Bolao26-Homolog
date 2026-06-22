@@ -462,16 +462,14 @@ function refreshAfterLiveUpdate() {
   if (state.view === "inicio") {
     const liveSlot = $("#home-live-slot");
     const picksSlot = $("#home-picks-slot");
-    const rankingSlot = $("#home-ranking-slot");
 
-    if (!liveSlot || !picksSlot || !rankingSlot) {
+    if (!liveSlot || !picksSlot) {
       renderHome();
       return;
     }
 
     liveSlot.innerHTML = renderLiveSection();
     picksSlot.innerHTML = renderHomeMatchPicksSection();
-    rankingSlot.innerHTML = renderHomeRankingSection();
     bindHomeEvents();
     scheduleHomeMatchTransition();
     return;
@@ -636,6 +634,11 @@ function submitBackend(payload) {
 function render() {
   setActiveTab();
 
+  if (state.view === "ranking") {
+    renderRankingView();
+    return;
+  }
+
   if (state.view === "oficial") {
     renderOfficial();
     return;
@@ -654,10 +657,7 @@ function renderHome() {
     <div class="stack">
       <div id="home-live-slot">${renderLiveSection()}</div>
       <div id="home-picks-slot">${renderHomeMatchPicksSection()}</div>
-      <div class="home-dashboard-grid">
-        ${renderUpcomingGamesSection()}
-        <div id="home-ranking-slot">${renderHomeRankingSection()}</div>
-      </div>
+      ${renderUpcomingGamesSection()}
     </div>
   `;
 
@@ -665,9 +665,19 @@ function renderHome() {
   scheduleHomeMatchTransition();
 }
 
-function renderHomeRankingSection() {
+function renderRankingView() {
+  app.innerHTML = `
+    <div class="stack">
+      ${renderRankingSection()}
+      ${renderSponsorBlock(true)}
+    </div>
+  `;
+  bindEvents();
+}
+
+function renderRankingSection() {
   return `
-    <section class="card home-ranking-card">
+    <section class="card ranking-page-card">
       <div class="title-row">
         <h2>🏆 Ranking dos players</h2>
         <span class="kicker">Classificação atual</span>
@@ -685,18 +695,27 @@ function getNextScheduledMatch() {
     .sort((a, b) => makeDate(a) - makeDate(b))[0] || null;
 }
 
-function getImminentUpcomingMatch() {
-  const nextMatch = getNextScheduledMatch();
+function getImminentUpcomingMatches() {
+  const now = Date.now();
 
-  if (!nextMatch) {
-    return null;
-  }
+  return DATA.matches
+    .filter((match) => {
+      if (!isFutureScheduledMatch(match)) return false;
+      const timeUntilKickoff = makeDate(match).getTime() - now;
+      return timeUntilKickoff >= 0 && timeUntilKickoff <= UPCOMING_FEATURE_WINDOW_MS;
+    })
+    .sort((a, b) => makeDate(a) - makeDate(b) || Number(a.number || 0) - Number(b.number || 0));
+}
 
-  const timeUntilKickoff = makeDate(nextMatch).getTime() - Date.now();
+function getFirstImminentUpcomingMatch() {
+  return getImminentUpcomingMatches()[0] || null;
+}
 
-  return timeUntilKickoff >= 0 && timeUntilKickoff <= UPCOMING_FEATURE_WINDOW_MS
-    ? nextMatch
-    : null;
+function getUpcomingGamesLimit(round) {
+  if (round === "Rodada 1") return 4;
+  if (round === "Rodada 2") return 5;
+  if (round === "Rodada 3") return 8;
+  return 2;
 }
 
 function scheduleHomeMatchTransition() {
@@ -740,7 +759,7 @@ function getHomeReferenceMatch() {
     .filter((match) => isLiveMatch(match))
     .sort((a, b) => makeDate(a) - makeDate(b))[0];
 
-  return liveMatch || getImminentUpcomingMatch() || getLastFinishedMatch();
+  return liveMatch || getFirstImminentUpcomingMatch() || getLastFinishedMatch();
 }
 
 function getChronologicalMatches() {
@@ -829,8 +848,6 @@ function renderHomeMatchPicksSection() {
 
         ${matchLine(match)}
 
-        ${renderHomeFinishedMatchDetails(match)}
-
         ${roundClosed
           ? `<div class="player-picks">
               ${DATA.players.map((player) => {
@@ -844,36 +861,12 @@ function renderHomeMatchPicksSection() {
                   </div>
                 `;
               }).join("")}
-            </div>`
+            </div>
+            ${renderHomeFinishedMatchDetails(match)}`
           : `<div class="notice picks-locked-notice">🔒 Os palpites serão exibidos após o fechamento da rodada.</div>`
         }
       </div>
     </section>
-  `;
-}
-
-function renderHomeFinishedMatchDetails(match) {
-  if (!isFinishedStatus(match)) {
-    return "";
-  }
-
-  const events = liveMatchEvents(match);
-  const statistics = liveMatchStatistics(match);
-
-  if (!events.length && !statistics) {
-    return "";
-  }
-
-  return `
-    <div class="home-finished-match-details">
-      ${events.length ? `
-        <div class="finished-events-title">Eventos</div>
-        <div class="live-event-list finished-goals-aligned">
-          ${events.map((event) => liveEventRow(event, match)).join("")}
-        </div>
-      ` : ""}
-      ${statistics}
-    </div>
   `;
 }
 
@@ -903,63 +896,53 @@ function bindHomeEvents() {
 function renderLiveSection() {
   const liveMatches = DATA.matches
     .filter((match) => isLiveMatch(match))
-    .sort((a, b) => makeDate(a) - makeDate(b));
+    .sort((a, b) => makeDate(a) - makeDate(b) || Number(a.number || 0) - Number(b.number || 0));
 
-  if (!liveMatches.length) {
-    const upcomingMatch = getImminentUpcomingMatch();
+  if (liveMatches.length) {
+    return `
+      <section class="card live-section">
+        <div class="title-row">
+          <h2>🔴 Ao vivo</h2>
+          <span class="kicker">${liveMatches.length > 1 ? `${liveMatches.length} jogos em andamento` : "Jogo em andamento"}</span>
+        </div>
 
-    if (upcomingMatch) {
-      return renderImminentUpcomingMatch(upcomingMatch);
-    }
-
-    const lastMatch = getLastFinishedMatch();
-
-    if (!lastMatch) {
-      return `
-        <section class="card live-empty-card">
-          <div class="live-empty-line">
-            <h2>🔴 Ao vivo</h2>
-            <span>Nenhum jogo agora</span>
-          </div>
-        </section>
-      `;
-    }
-
-    return renderLastFinishedMatch(lastMatch);
+        <div class="games-list">
+          ${liveMatches.map(liveGameCard).join("")}
+        </div>
+      </section>
+    `;
   }
 
-  return `
-    <section class="card live-section">
-      <div class="title-row">
-        <h2>🔴 Ao vivo</h2>
-      </div>
+  const imminentMatches = getImminentUpcomingMatches();
 
-      <div class="games-list">
-        ${liveMatches.map(liveGameCard).join("")}
-      </div>
-    </section>
-  `;
+  if (imminentMatches.length) {
+    return renderImminentUpcomingMatches(imminentMatches);
+  }
+
+  return "";
 }
 
-function renderImminentUpcomingMatch(match) {
+function renderImminentUpcomingMatches(matches) {
   return `
     <section class="card live-section upcoming-featured-section">
       <div class="title-row">
-        <h2>⏳ Próximo jogo</h2>
-        <span class="kicker">Começa em até 30 minutos</span>
+        <h2>🔴 Ao vivo</h2>
+        <span class="kicker">${matches.length > 1 ? "Jogos começam em até 30 minutos" : "Jogo começa em até 30 minutos"}</span>
       </div>
 
       <div class="games-list">
-        <div class="game-card live-game-card upcoming-featured-card">
-          <div class="game-top">
-            <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-            <span>${formatDate(match.date)} · ${match.time}</span>
+        ${matches.map((match) => `
+          <div class="game-card live-game-card upcoming-featured-card">
+            <div class="game-top">
+              <span>${displayRound(match.round)} · Jogo ${match.number}</span>
+              <span>${formatDate(match.date)} · ${match.time}</span>
+            </div>
+
+            ${matchLine(match)}
+
+            <div class="muted live-venue">${escapeHtml(match.venue || "")}</div>
           </div>
-
-          ${matchLine(match)}
-
-          <div class="muted live-venue">${escapeHtml(match.venue || "")}</div>
-        </div>
+        `).join("")}
       </div>
     </section>
   `;
@@ -1073,16 +1056,18 @@ function renderLastFinishedMatch(match) {
 }
 
 function renderUpcomingGamesSection() {
-  const upcoming = DATA.matches
+  const scheduled = DATA.matches
     .filter((match) => isFutureScheduledMatch(match))
-    .sort((a, b) => makeDate(a) - makeDate(b))
-    .slice(0, 5);
+    .sort((a, b) => makeDate(a) - makeDate(b) || Number(a.number || 0) - Number(b.number || 0));
+  const referenceRound = scheduled[0]?.round || "Rodada 1";
+  const limit = getUpcomingGamesLimit(referenceRound);
+  const upcoming = scheduled.slice(0, limit);
 
   return `
     <section class="card upcoming-card">
       <div class="title-row">
         <h2>⏭️ Próximos jogos</h2>
-        <span class="kicker">5 próximos</span>
+        <span class="kicker">${limit} próximos</span>
       </div>
 
       ${upcoming.length
@@ -1097,9 +1082,9 @@ function compactGameCard(match) {
   return `
     <div class="compact-game">
       <div class="compact-game-main">
-        <span>${compactCountry(match.team1)}</span>
+        <span>${compactKnockoutTeam(match.team1)}</span>
         <strong>${matchResultInline(match)}</strong>
-        <span>${compactCountry(match.team2)}</span>
+        <span>${compactKnockoutTeam(match.team2)}</span>
       </div>
       <div class="compact-game-meta">
         <span>${formatDate(match.date)} · ${match.time}</span>
@@ -2272,8 +2257,12 @@ function roundDeadline(round) {
     .filter((m) => m.round === round)
     .sort((a, b) => makeDate(a) - makeDate(b))[0];
 
+  if (!first) {
+    return new Date(8640000000000000);
+  }
+
   const date = makeDate(first);
-  date.setHours(date.getHours() - DATA.settings.lockHoursBeforeRound);
+  date.setMinutes(date.getMinutes() - Math.round(Number(DATA.settings.lockHoursBeforeRound || 0) * 60));
   return date;
 }
 
@@ -2398,6 +2387,21 @@ function countryCode(name) {
   return codes[name] || String(name || "").slice(0, 3).toUpperCase();
 }
 
+function compactKnockoutTeam(name) {
+  const text = String(name || "").trim();
+
+  if (text.includes(" ou ")) {
+    const flags = text
+      .split(/\s+ou\s+/i)
+      .map((team) => flagMarkup(team.trim()))
+      .join('<span class="knockout-or">ou</span>');
+
+    return `<span class="compact-country compact-country-flags-only">${flags}</span>`;
+  }
+
+  return compactCountry(text);
+}
+
 function compactVenue(venue) {
   const text = String(venue || "");
   const parts = text.split(" - ");
@@ -2474,10 +2478,14 @@ function isFinishedStatus(match) {
     match && match.elapsed
   ].join(' ').toLowerCase();
 
+  if (text.includes('half') || text.includes('intervalo')) {
+    return false;
+  }
+
   return text.includes('final') ||
     text.includes('finished') ||
     text.includes('encerrado') ||
-    text.includes('ft');
+    /(^|\s)ft($|\s)/.test(text);
 }
 
 function matchResultInline(match) {
