@@ -18,13 +18,15 @@ const state = {
   homePicksMatchId: "",
   homePicksManual: false,
   loadedBackend: false,
-  saveInFlight: false
+  saveInFlight: false,
+  rankingRange: localStorage.getItem("bolao-ranking-range") || "last10"
 };
 
 const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
 let liveRefreshTimer = null;
 let homeMatchTransitionTimer = null;
+let deadlineRefreshTimer = null;
 let baseRequestPromise = null;
 let liveRequestPromise = null;
 let deferredBackendRender = false;
@@ -656,6 +658,8 @@ function submitBackend(payload) {
     playerId: payload.playerId,
     playerCode: payload.playerCode,
     round: payload.round,
+    deadline: roundDeadline(payload.round).toISOString(),
+    lockMinutesBeforeRound: Number(DATA.settings.lockMinutesBeforeRound ?? 15),
     picks: payload.picks.map((pick) => ({
       m: pick.matchId,
       a: pick.g1,
@@ -669,6 +673,11 @@ function submitBackend(payload) {
 
 function render() {
   setActiveTab();
+
+  if (deadlineRefreshTimer && state.view !== "inicio" && state.view !== "palpites") {
+    window.clearInterval(deadlineRefreshTimer);
+    deadlineRefreshTimer = null;
+  }
 
   if (state.view === "ranking") {
     renderRanking();
@@ -700,19 +709,207 @@ function renderHome() {
 
   bindHomeEvents();
   scheduleHomeMatchTransition();
+  scheduleDeadlineRefresh();
 }
 
 function renderRanking() {
+  const allowedRanges = ["last10", "all", "groups", "knockout"];
+  if (!allowedRanges.includes(state.rankingRange)) {
+    state.rankingRange = "last10";
+  }
+
   app.innerHTML = `
     <div class="stack">
       <section class="card ranking-page-card">
         <div class="title-row">
           <h2>🏆 Ranking dos players</h2>
-          <span class="kicker">Classificação atual</span>
+          <span class="kicker">Variação por jogo</span>
+        </div>
+
+        <div class="ranking-filter-buttons" role="group" aria-label="Período do gráfico de ranking">
+          ${rankingFilterButton("last10", "Últimos 10 jogos")}
+          ${rankingFilterButton("all", "Desde sempre")}
+          ${rankingFilterButton("groups", "Apenas grupos")}
+          ${rankingFilterButton("knockout", "Apenas Mata-mata")}
+        </div>
+
+        ${renderRankingEvolutionChart(state.rankingRange)}
+      </section>
+
+      <section class="card ranking-current-card">
+        <div class="title-row">
+          <h2>📋 Classificação atual</h2>
+          <span class="kicker">Pontuação acumulada</span>
         </div>
         ${rankingTable(calculateRanking())}
       </section>
+
       ${renderSponsorBlock(true)}
+    </div>
+  `;
+
+  bindRankingEvents();
+}
+
+function rankingFilterButton(value, label) {
+  const active = state.rankingRange === value;
+  return `
+    <button
+      type="button"
+      class="ranking-filter-button ${active ? "active" : ""}"
+      data-ranking-range="${value}"
+      aria-pressed="${active ? "true" : "false"}"
+    >${label}</button>
+  `;
+}
+
+function bindRankingEvents() {
+  document.querySelectorAll("[data-ranking-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const range = button.dataset.rankingRange || "last10";
+      state.rankingRange = range;
+      localStorage.setItem("bolao-ranking-range", range);
+      renderRanking();
+      setActiveTab();
+    });
+  });
+}
+
+function getCompletedRankedMatches(range) {
+  let completed = DATA.matches
+    .filter((match) => {
+      const score = getPredictionScore(match);
+      return score.home !== null && score.away !== null && !isFutureScheduledMatch(match);
+    })
+    .sort((first, second) => {
+      return makeDate(first).getTime() - makeDate(second).getTime() ||
+        Number(first.number || 0) - Number(second.number || 0);
+    });
+
+  if (range === "groups") {
+    completed = completed.filter((match) => groupStageRounds.includes(match.round));
+  } else if (range === "knockout") {
+    completed = completed.filter((match) => !groupStageRounds.includes(match.round));
+  } else if (range === "last10") {
+    completed = completed.slice(-10);
+  }
+
+  return completed;
+}
+
+function buildRankingAtMatches(matches) {
+  const matchIds = new Set(matches.map((match) => match.id));
+
+  return DATA.players.map((player) => {
+    let points = 0;
+    let exacts = 0;
+
+    DATA.matches.forEach((match) => {
+      if (!matchIds.has(match.id)) return;
+      const scored = scorePick(state.picks[player.id]?.[match.id], match);
+      points += scored.points;
+      exacts += scored.exact ? 1 : 0;
+    });
+
+    return { id: player.id, name: player.name, points, exacts };
+  }).sort((first, second) => {
+    return second.points - first.points ||
+      second.exacts - first.exacts ||
+      first.name.localeCompare(second.name);
+  });
+}
+
+function renderRankingEvolutionChart(range) {
+  const matches = getCompletedRankedMatches(range);
+
+  if (!matches.length) {
+    const message = range === "knockout"
+      ? "O gráfico do Mata-mata aparecerá após o primeiro jogo finalizado."
+      : "O gráfico aparecerá após o primeiro jogo finalizado.";
+    return `<div class="info-box ranking-chart-empty">${message}</div>`;
+  }
+
+  const allCompletedMatches = getCompletedRankedMatches("all");
+  const snapshots = matches.map((match) => {
+    const absoluteIndex = allCompletedMatches.findIndex((item) => item.id === match.id);
+    const ranking = buildRankingAtMatches(
+      allCompletedMatches.slice(0, Math.max(0, absoluteIndex) + 1)
+    );
+
+    return {
+      match,
+      positions: new Map(ranking.map((player, position) => [player.id, position + 1]))
+    };
+  });
+
+  const chartHeight = 500;
+  const top = 30;
+  const bottom = 62;
+  const left = 54;
+  const right = 128;
+  const pointGap = range === "all" ? 54 : 86;
+  const chartWidth = Math.max(760, left + right + Math.max(1, matches.length - 1) * pointGap);
+  const plotHeight = chartHeight - top - bottom;
+  const plotWidth = chartWidth - left - right;
+  const xFor = (index) => matches.length === 1
+    ? left + plotWidth / 2
+    : left + index * (plotWidth / (matches.length - 1));
+  const yFor = (position) => top + ((position - 1) / Math.max(1, DATA.players.length - 1)) * plotHeight;
+  const labelEvery = Math.max(1, Math.ceil(matches.length / 10));
+
+  const grid = DATA.players.map((_, index) => {
+    const position = index + 1;
+    const y = yFor(position);
+    return `
+      <line class="ranking-chart-grid-line" x1="${left}" y1="${y}" x2="${chartWidth - right}" y2="${y}"></line>
+      <text class="ranking-chart-rank-label" x="${left - 14}" y="${y + 4}" text-anchor="end">${position}º</text>
+    `;
+  }).join("");
+
+  const series = DATA.players.map((player, playerIndex) => {
+    const points = snapshots.map((snapshot, index) => ({
+      x: xFor(index),
+      y: yFor(snapshot.positions.get(player.id) || DATA.players.length),
+      position: snapshot.positions.get(player.id) || DATA.players.length,
+      match: snapshot.match
+    }));
+    const hue = Math.round((playerIndex * 360) / DATA.players.length);
+    const pointString = points.map((point) => `${point.x},${point.y}`).join(" ");
+    const last = points[points.length - 1];
+
+    return `
+      <g class="ranking-chart-player" style="--ranking-player-color:hsl(${hue} 82% 62%)">
+        <polyline class="ranking-chart-line" points="${pointString}"></polyline>
+        ${points.map((point) => `
+          <circle class="ranking-chart-point" cx="${point.x}" cy="${point.y}" r="4">
+            <title>${escapeHtml(player.name)}: ${point.position}º após o Jogo ${point.match.number}</title>
+          </circle>
+        `).join("")}
+        <text class="ranking-chart-end-label" x="${last.x + 10}" y="${last.y + 4}">${escapeHtml(player.name)}</text>
+      </g>
+    `;
+  }).join("");
+
+  const xLabels = matches.map((match, index) => {
+    const shouldShow = index === 0 || index === matches.length - 1 || index % labelEvery === 0;
+    if (!shouldShow) return "";
+    const x = xFor(index);
+    return `
+      <text class="ranking-chart-game-label" x="${x}" y="${chartHeight - 28}" text-anchor="middle">J${match.number}</text>
+    `;
+  }).join("");
+
+  return `
+    <div class="ranking-chart-summary">
+      <strong>${matches.length} jogo${matches.length === 1 ? "" : "s"}</strong>
+      <span>Posição 1 no topo; passe o cursor ou toque nos pontos para ver o jogo.</span>
+    </div>
+    <div class="ranking-chart-scroll" tabindex="0" aria-label="Gráfico de variação do ranking por jogo">
+      <svg class="ranking-chart" viewBox="0 0 ${chartWidth} ${chartHeight}" width="${chartWidth}" height="${chartHeight}" role="img" aria-label="Variação da posição de cada jogador no ranking">
+        ${grid}
+        ${series}
+        ${xLabels}
+      </svg>
     </div>
   `;
 }
@@ -809,15 +1006,58 @@ function renderNextRoundDeadlineSection() {
   }
 
   return `
-    <section class="card next-round-deadline-card">
+    <section class="card next-round-deadline-card" data-deadline-round="${escapeHtml(nextRound.round)}">
       <div class="next-round-deadline-icon" aria-hidden="true">⏰</div>
       <div class="next-round-deadline-content">
         <span class="next-round-deadline-label">Fechamento da próxima rodada</span>
         <strong>${escapeHtml(displayRound(nextRound.round))}</strong>
-        <span>${formatDateTime(deadline)}</span>
+        <span class="next-round-deadline-date">${formatDateTime(deadline)}</span>
+        <span class="round-deadline-countdown" data-deadline-time="${deadline.getTime()}">${formatDeadlineCountdown(deadline)}</span>
       </div>
     </section>
   `;
+}
+
+function formatDeadlineCountdown(deadline) {
+  const remaining = deadline.getTime() - Date.now();
+
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    return "Prazo encerrado";
+  }
+
+  const totalMinutes = Math.max(1, Math.ceil(remaining / 60000));
+
+  if (totalMinutes >= 24 * 60) {
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    return `Faltam ${days} dia${days === 1 ? "" : "s"}${hours ? ` e ${hours}h` : ""}`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return `Faltam ${hours}h${minutes ? ` ${minutes}min` : ""}`;
+  }
+
+  return `Faltam ${minutes} minuto${minutes === 1 ? "" : "s"}`;
+}
+
+function updateDeadlineCountdowns() {
+  document.querySelectorAll(".round-deadline-countdown[data-deadline-time]").forEach((element) => {
+    const timestamp = Number(element.dataset.deadlineTime);
+    element.textContent = formatDeadlineCountdown(new Date(timestamp));
+  });
+}
+
+function scheduleDeadlineRefresh() {
+  if (deadlineRefreshTimer) {
+    window.clearInterval(deadlineRefreshTimer);
+    deadlineRefreshTimer = null;
+  }
+
+  updateDeadlineCountdowns();
+  deadlineRefreshTimer = window.setInterval(updateDeadlineCountdowns, 30000);
 }
 
 function getNextScheduledMatch() {
@@ -993,10 +1233,11 @@ function renderHomeMatchPicksSection() {
                 const pick = state.picks[player.id]?.[match.id];
 
                 return `
-                  <div class="player-pick">
+                  <div class="player-pick ${playerPickClass(pick, match)}">
                     <span class="player-pick-name">${player.name}</span>
                     <span class="player-pick-score">${formatPick(pick)}</span>
                     <span class="player-pick-date">${formatPickLastSaved(pick)}</span>
+                    ${playerPickResultBadge(pick, match)}
                   </div>
                 `;
               }).join("")}
@@ -1454,12 +1695,14 @@ function renderOfficial() {
 function renderPicksArea() {
   app.innerHTML = `
     <div class="stack">
+      ${renderNextRoundDeadlineSection()}
       ${renderBetSection()}
       ${renderPicksSection()}
       ${renderSponsorBlock(true)}
     </div>
   `;
   bindEvents();
+  scheduleDeadlineRefresh();
 }
 
 function renderSponsorBlock(compact = false) {
@@ -1572,6 +1815,7 @@ function liveMatchDetails(match) {
 
 function liveMatchEvents(match) {
   const events = normalizeGoalList(match && match.events, "")
+    .filter((event) => eventBelongsToMatch(event, match))
     .map((event) => {
       const kind = String(event.kind || inferEventKind(event)).toLowerCase();
       const side = event.side === "away" || event.side === "home"
@@ -1607,6 +1851,28 @@ function liveMatchEvents(match) {
     seen.add(key);
     return true;
   });
+}
+
+function eventBelongsToMatch(event, match) {
+  if (!event || !match) return false;
+
+  const eventMatchId = String(event.matchId || "").trim();
+  if (eventMatchId && eventMatchId !== String(match.id || "")) {
+    return false;
+  }
+
+  const eventHome = normalizeEventTeamName(event.homeTeam);
+  const eventAway = normalizeEventTeamName(event.awayTeam);
+
+  if (eventHome && eventAway) {
+    const homeAliases = eventTeamAliases(match.team1);
+    const awayAliases = eventTeamAliases(match.team2);
+    const homeMatches = homeAliases.some((alias) => eventHome === alias || eventHome.includes(alias) || alias.includes(eventHome));
+    const awayMatches = awayAliases.some((alias) => eventAway === alias || eventAway.includes(alias) || alias.includes(eventAway));
+    if (!homeMatches || !awayMatches) return false;
+  }
+
+  return true;
 }
 
 function inferEventKind(event) {
@@ -1860,7 +2126,10 @@ function normalizeGoalList(value, team) {
       sequence: item.sequence || item.id || "",
       synthetic: Boolean(item.synthetic),
       score: item.score || {},
-      card: item.card || ""
+      card: item.card || "",
+      matchId: item.matchId || item.match || item.gameId || item.eventMatchId || "",
+      homeTeam: item.homeTeam || item.team1 || "",
+      awayTeam: item.awayTeam || item.team2 || ""
     };
   }).filter((item) => {
     return item && (
@@ -2136,10 +2405,11 @@ function renderPicksSection() {
                   ${DATA.players.map((player) => {
                     const pick = state.picks[player.id]?.[match.id];
                     return `
-                      <div class="player-pick">
+                      <div class="player-pick ${playerPickClass(pick, match)}">
                         <span class="player-pick-name">${player.name}</span>
                         <span class="player-pick-score">${formatPick(pick)}</span>
                         <span class="player-pick-date">${formatPickLastSaved(pick)}</span>
+                        ${playerPickResultBadge(pick, match)}
                       </div>
                     `;
                   }).join("")}
@@ -2372,6 +2642,29 @@ function saveRoundPicks(round) {
     state.saveInFlight = false;
     setSaveButtonBusy(false);
   });
+}
+
+function playerPickClass(pick, match) {
+  if (!isFinishedStatus(match)) return "";
+  const scored = scorePick(pick, match);
+  if (scored.exact) return "player-pick-exact";
+  if (scored.result) return "player-pick-result";
+  return "";
+}
+
+function playerPickResultBadge(pick, match) {
+  if (!isFinishedStatus(match)) return "";
+  const scored = scorePick(pick, match);
+
+  if (scored.exact) {
+    return `<span class="player-pick-hit-badge exact">Placar exato · +${DATA.settings.exactScorePoints}</span>`;
+  }
+
+  if (scored.result) {
+    return `<span class="player-pick-hit-badge result">Resultado · +${DATA.settings.resultPoints}</span>`;
+  }
+
+  return "";
 }
 
 function rankingTable(ranking) {

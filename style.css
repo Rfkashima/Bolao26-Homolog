@@ -2483,3 +2483,209 @@ iframe{
   content-visibility: visible !important;
   contain-intrinsic-size: auto !important;
 }
+
+/* Entrega consolidada: prazo, destaque dos palpites e gráfico de ranking. */
+.main-tabs button[data-view="ranking"]{
+  border-color: rgba(255,207,58,.44) !important;
+}
+
+.main-tabs button[data-view="ranking"].active{
+  background: linear-gradient(135deg, rgba(255,207,58,.98), rgba(209,137,0,.96)) !important;
+  color: #1c1200 !important;
+}
+
+.next-round-deadline-content{
+  grid-template-columns: minmax(0, 1fr) auto !important;
+}
+
+.next-round-deadline-date{
+  color: var(--text) !important;
+  font-size: 12px !important;
+  font-weight: 850 !important;
+  text-align: right !important;
+  white-space: nowrap !important;
+}
+
+.round-deadline-countdown{
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  border: 1px solid rgba(255,207,58,.28);
+  border-radius: 999px;
+  background: rgba(255,207,58,.08);
+  color: #ffe58a !important;
+  padding: 5px 9px;
+  font-size: 12px !important;
+  font-weight: 1000 !important;
+  text-align: center !important;
+  white-space: normal !important;
+}
+
+.player-pick{
+  position: relative;
+}
+
+.player-pick-exact{
+  border-color: rgba(34,255,74,.82) !important;
+  background: linear-gradient(180deg, rgba(34,255,74,.16), rgba(4,9,18,.94)) !important;
+  box-shadow: inset 0 0 0 1px rgba(34,255,74,.18), 0 0 18px rgba(34,255,74,.10);
+}
+
+.player-pick-result{
+  border-color: rgba(255,207,58,.78) !important;
+  background: linear-gradient(180deg, rgba(255,207,58,.14), rgba(4,9,18,.94)) !important;
+  box-shadow: inset 0 0 0 1px rgba(255,207,58,.16);
+}
+
+.player-pick-hit-badge{
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin-top: 3px;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 8px;
+  font-weight: 1000;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+
+.player-pick-hit-badge.exact{
+  background: rgba(34,255,74,.18);
+  color: #8cff9f;
+}
+
+.player-pick-hit-badge.result{
+  background: rgba(255,207,58,.16);
+  color: #ffe58a;
+}
+
+.ranking-filter-buttons{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 12px;
+}
+
+.ranking-filter-button{
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid rgba(0,167,255,.42);
+  border-radius: 12px;
+  background: rgba(2,7,16,.88);
+  color: var(--text);
+  padding: 7px 8px;
+  font-size: 11px;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+.ranking-filter-button.active{
+  border-color: rgba(255,207,58,.82);
+  background: linear-gradient(135deg, rgba(255,207,58,.94), rgba(204,132,0,.94));
+  color: #1b1100;
+}
+
+.ranking-chart-summary{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.ranking-chart-summary strong{
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ranking-chart-scroll{
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid rgba(0,167,255,.24);
+  border-radius: 14px;
+  background: rgba(2,7,16,.72);
+  overscroll-behavior-x: contain;
+}
+
+.ranking-chart{
+  display: block;
+  max-width: none !important;
+  min-width: 760px;
+}
+
+.ranking-chart-grid-line{
+  stroke: rgba(174,184,199,.16);
+  stroke-width: 1;
+}
+
+.ranking-chart-rank-label,
+.ranking-chart-game-label,
+.ranking-chart-end-label{
+  fill: #c8d5e4;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.ranking-chart-end-label{
+  fill: var(--ranking-player-color);
+  font-size: 10px;
+}
+
+.ranking-chart-line{
+  fill: none;
+  stroke: var(--ranking-player-color);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: .88;
+}
+
+.ranking-chart-point{
+  fill: var(--ranking-player-color);
+  stroke: #02040a;
+  stroke-width: 1.5;
+}
+
+.ranking-chart-player:hover .ranking-chart-line,
+.ranking-chart-player:focus-within .ranking-chart-line{
+  stroke-width: 4;
+  opacity: 1;
+}
+
+.ranking-chart-empty{
+  margin-top: 4px;
+}
+
+.ranking-current-card{
+  min-width: 0;
+}
+
+@media (max-width: 720px){
+  .next-round-deadline-content{
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .next-round-deadline-date{
+    text-align: left !important;
+    white-space: normal !important;
+  }
+
+  .ranking-filter-buttons{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ranking-filter-button{
+    min-height: 38px;
+    font-size: 10px;
+  }
+
+  .ranking-chart-summary{
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+}
