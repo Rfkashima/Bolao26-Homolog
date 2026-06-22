@@ -1731,6 +1731,7 @@ function renderSponsorBlock(compact = false) {
 
 function renderGroupsSection() {
   const standings = calculateGroupStandings();
+  const qualifyingTeams = calculateCurrentGroupQualifiers(standings);
 
   return `
     <section>
@@ -1739,13 +1740,57 @@ function renderGroupsSection() {
         <span class="kicker">Tabela + jogos</span>
       </div>
       <div class="group-grid">
-        ${DATA.groups.map((group) => groupCard(group, standings[group.id] || [])).join("")}
+        ${DATA.groups.map((group) => groupCard(group, standings[group.id] || [], qualifyingTeams)).join("")}
       </div>
     </section>
   `;
 }
 
-function groupCard(group, rows) {
+function calculateCurrentGroupQualifiers(standings) {
+  const startedGroups = new Set();
+
+  DATA.matches.forEach((match) => {
+    const score = getPredictionScore(match);
+    if (
+      groupStageRounds.includes(match.round) &&
+      !isFutureScheduledMatch(match) &&
+      score.home !== null &&
+      score.away !== null
+    ) {
+      startedGroups.add(String(match.group || "").replace("Grupo ", ""));
+    }
+  });
+
+  const directQualifiers = new Set();
+  const thirdPlaced = [];
+
+  startedGroups.forEach((groupId) => {
+    const rows = standings[groupId] || [];
+    rows.slice(0, 2).forEach((row) => directQualifiers.add(row.team));
+
+    if (rows[2]) {
+      thirdPlaced.push({
+        ...rows[2],
+        groupId
+      });
+    }
+  });
+
+  thirdPlaced.sort((first, second) =>
+    second.pts - first.pts ||
+    second.sg - first.sg ||
+    second.gp - first.gp ||
+    first.team.localeCompare(second.team)
+  );
+
+  const bestThirdQualifiers = new Set(
+    thirdPlaced.slice(0, 8).map((row) => row.team)
+  );
+
+  return new Set([...directQualifiers, ...bestThirdQualifiers]);
+}
+
+function groupCard(group, rows, qualifyingTeams) {
   const matches = DATA.matches.filter((match) => match.group === group.name && groupStageRounds.includes(match.round));
 
   return `
@@ -1768,7 +1813,7 @@ function groupCard(group, rows) {
           </thead>
           <tbody>
             ${rows.map((row, index) => `
-              <tr>
+              <tr class="${qualifyingTeams.has(row.team) ? "group-qualified-row" : ""}">
                 <td>${index + 1}</td>
                 <td>${country(row.team)}</td>
                 <td class="center strong">${row.pts}</td>

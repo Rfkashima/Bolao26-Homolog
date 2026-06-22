@@ -7,7 +7,7 @@ window.BOLAO_DATA = {
     "prizeWinners": 4,
     "lockMinutesBeforeRound": 15,
     "showPicksBeforeDeadline": false,
-    "apiUrl": "https://script.google.com/macros/s/AKfycbyznSo37nnchBRTJNl49gZoE5Q0w8jpb_fvLS12dK0ll7RjQcSv2mzYNfjMiC-BLGWa_g/exec"
+    "apiUrl": "https://script.google.com/macros/s/AKfycbyVmpnD_pntJIN2mNQqcNWi0AIFg9yMWl5ar33ukI7Joc1tqI-pj8pa5rEmgxAwE6Hspw/exec"
   },
   "players": [
     {

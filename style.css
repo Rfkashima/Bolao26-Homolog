@@ -2689,3 +2689,20 @@ iframe{
     gap: 3px;
   }
 }
+
+/* Aba Oficial: destaque provisório das seleções classificadas ao mata-mata. */
+.group-table tbody tr.group-qualified-row > td{
+  background: rgba(34, 255, 74, .12);
+  border-top-color: rgba(34, 255, 74, .38);
+  border-bottom-color: rgba(34, 255, 74, .38);
+}
+
+.group-table tbody tr.group-qualified-row > td:first-child{
+  box-shadow: inset 3px 0 0 var(--world-green);
+}
+
+.group-table tbody tr.group-qualified-row > td:nth-child(2),
+.group-table tbody tr.group-qualified-row > td:nth-child(3){
+  color: #dfffe5;
+  font-weight: 950;
+}
