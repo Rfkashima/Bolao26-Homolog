@@ -462,14 +462,16 @@ function refreshAfterLiveUpdate() {
   if (state.view === "inicio") {
     const liveSlot = $("#home-live-slot");
     const picksSlot = $("#home-picks-slot");
+    const rankingSlot = $("#home-ranking-slot");
 
-    if (!liveSlot || !picksSlot) {
+    if (!liveSlot || !picksSlot || !rankingSlot) {
       renderHome();
       return;
     }
 
     liveSlot.innerHTML = renderLiveSection();
     picksSlot.innerHTML = renderHomeMatchPicksSection();
+    rankingSlot.innerHTML = renderHomeRankingSection();
     bindHomeEvents();
     scheduleHomeMatchTransition();
     return;
@@ -634,11 +636,6 @@ function submitBackend(payload) {
 function render() {
   setActiveTab();
 
-  if (state.view === "ranking") {
-    renderRankingView();
-    return;
-  }
-
   if (state.view === "oficial") {
     renderOfficial();
     return;
@@ -657,7 +654,10 @@ function renderHome() {
     <div class="stack">
       <div id="home-live-slot">${renderLiveSection()}</div>
       <div id="home-picks-slot">${renderHomeMatchPicksSection()}</div>
-      ${renderUpcomingGamesSection()}
+      <div class="home-dashboard-grid">
+        ${renderUpcomingGamesSection()}
+        <div id="home-ranking-slot">${renderHomeRankingSection()}</div>
+      </div>
     </div>
   `;
 
@@ -665,19 +665,9 @@ function renderHome() {
   scheduleHomeMatchTransition();
 }
 
-function renderRankingView() {
-  app.innerHTML = `
-    <div class="stack">
-      ${renderRankingSection()}
-      ${renderSponsorBlock(true)}
-    </div>
-  `;
-  bindEvents();
-}
-
-function renderRankingSection() {
+function renderHomeRankingSection() {
   return `
-    <section class="card ranking-page-card">
+    <section class="card home-ranking-card">
       <div class="title-row">
         <h2>🏆 Ranking dos players</h2>
         <span class="kicker">Classificação atual</span>
@@ -696,26 +686,26 @@ function getNextScheduledMatch() {
 }
 
 function getImminentUpcomingMatches() {
-  const now = Date.now();
+  const nextMatch = getNextScheduledMatch();
+
+  if (!nextMatch) {
+    return [];
+  }
+
+  const nextKickoffAt = makeDate(nextMatch).getTime();
+  const timeUntilKickoff = nextKickoffAt - Date.now();
+
+  if (timeUntilKickoff < 0 || timeUntilKickoff > UPCOMING_FEATURE_WINDOW_MS) {
+    return [];
+  }
 
   return DATA.matches
-    .filter((match) => {
-      if (!isFutureScheduledMatch(match)) return false;
-      const timeUntilKickoff = makeDate(match).getTime() - now;
-      return timeUntilKickoff >= 0 && timeUntilKickoff <= UPCOMING_FEATURE_WINDOW_MS;
-    })
-    .sort((a, b) => makeDate(a) - makeDate(b) || Number(a.number || 0) - Number(b.number || 0));
+    .filter((match) => isFutureScheduledMatch(match) && makeDate(match).getTime() === nextKickoffAt)
+    .sort((a, b) => Number(a.number || 0) - Number(b.number || 0));
 }
 
-function getFirstImminentUpcomingMatch() {
+function getImminentUpcomingMatch() {
   return getImminentUpcomingMatches()[0] || null;
-}
-
-function getUpcomingGamesLimit(round) {
-  if (round === "Rodada 1") return 4;
-  if (round === "Rodada 2") return 5;
-  if (round === "Rodada 3") return 8;
-  return 2;
 }
 
 function scheduleHomeMatchTransition() {
@@ -759,7 +749,7 @@ function getHomeReferenceMatch() {
     .filter((match) => isLiveMatch(match))
     .sort((a, b) => makeDate(a) - makeDate(b))[0];
 
-  return liveMatch || getFirstImminentUpcomingMatch() || getLastFinishedMatch();
+  return liveMatch || getImminentUpcomingMatch() || getLastFinishedMatch();
 }
 
 function getChronologicalMatches() {
@@ -870,6 +860,31 @@ function renderHomeMatchPicksSection() {
   `;
 }
 
+function renderHomeFinishedMatchDetails(match) {
+  if (!isFinishedStatus(match)) {
+    return "";
+  }
+
+  const events = liveMatchEvents(match);
+  const statistics = liveMatchStatistics(match);
+
+  if (!events.length && !statistics) {
+    return "";
+  }
+
+  return `
+    <div class="home-finished-match-details">
+      ${events.length ? `
+        <div class="finished-events-title">Eventos</div>
+        <div class="live-event-list finished-goals-aligned">
+          ${events.map((event) => liveEventRow(event, match)).join("")}
+        </div>
+      ` : ""}
+      ${statistics}
+    </div>
+  `;
+}
+
 function bindHomeEvents() {
   const navigation = getHomePicksMatch();
   const previous = $("#previousHomePicksGame");
@@ -898,36 +913,44 @@ function renderLiveSection() {
     .filter((match) => isLiveMatch(match))
     .sort((a, b) => makeDate(a) - makeDate(b) || Number(a.number || 0) - Number(b.number || 0));
 
-  if (liveMatches.length) {
-    return `
-      <section class="card live-section">
-        <div class="title-row">
-          <h2>🔴 Ao vivo</h2>
-          <span class="kicker">${liveMatches.length > 1 ? `${liveMatches.length} jogos em andamento` : "Jogo em andamento"}</span>
-        </div>
+  if (!liveMatches.length) {
+    const upcomingMatches = getImminentUpcomingMatches();
 
-        <div class="games-list">
-          ${liveMatches.map(liveGameCard).join("")}
+    if (upcomingMatches.length) {
+      return renderImminentUpcomingMatches(upcomingMatches);
+    }
+
+    return `
+      <section class="card live-empty-card">
+        <div class="live-empty-line">
+          <h2>🔴 Ao vivo</h2>
+          <span>Nenhum jogo agora</span>
         </div>
       </section>
     `;
   }
 
-  const imminentMatches = getImminentUpcomingMatches();
+  return `
+    <section class="card live-section">
+      <div class="title-row">
+        <h2>🔴 Ao vivo</h2>
+      </div>
 
-  if (imminentMatches.length) {
-    return renderImminentUpcomingMatches(imminentMatches);
-  }
-
-  return "";
+      <div class="games-list">
+        ${liveMatches.map(liveGameCard).join("")}
+      </div>
+    </section>
+  `;
 }
 
 function renderImminentUpcomingMatches(matches) {
+  const title = matches.length > 1 ? "⏳ Próximos jogos" : "⏳ Próximo jogo";
+
   return `
     <section class="card live-section upcoming-featured-section">
       <div class="title-row">
-        <h2>🔴 Ao vivo</h2>
-        <span class="kicker">${matches.length > 1 ? "Jogos começam em até 30 minutos" : "Jogo começa em até 30 minutos"}</span>
+        <h2>${title}</h2>
+        <span class="kicker">Começa em até 30 minutos</span>
       </div>
 
       <div class="games-list">
@@ -1055,19 +1078,31 @@ function renderLastFinishedMatch(match) {
   `;
 }
 
+function getUpcomingGamesLimit(upcomingMatches) {
+  const firstUpcoming = upcomingMatches[0];
+
+  if (!firstUpcoming) {
+    return 0;
+  }
+
+  if (firstUpcoming.round === "Rodada 1") return 4;
+  if (firstUpcoming.round === "Rodada 2") return 5;
+  if (firstUpcoming.round === "Rodada 3") return 8;
+  return 2;
+}
+
 function renderUpcomingGamesSection() {
-  const scheduled = DATA.matches
+  const upcomingMatches = DATA.matches
     .filter((match) => isFutureScheduledMatch(match))
     .sort((a, b) => makeDate(a) - makeDate(b) || Number(a.number || 0) - Number(b.number || 0));
-  const referenceRound = scheduled[0]?.round || "Rodada 1";
-  const limit = getUpcomingGamesLimit(referenceRound);
-  const upcoming = scheduled.slice(0, limit);
+  const limit = getUpcomingGamesLimit(upcomingMatches);
+  const upcoming = upcomingMatches.slice(0, limit);
 
   return `
     <section class="card upcoming-card">
       <div class="title-row">
         <h2>⏭️ Próximos jogos</h2>
-        <span class="kicker">${limit} próximos</span>
+        <span class="kicker">${limit || 0} próximos</span>
       </div>
 
       ${upcoming.length
@@ -1082,9 +1117,9 @@ function compactGameCard(match) {
   return `
     <div class="compact-game">
       <div class="compact-game-main">
-        <span>${compactKnockoutTeam(match.team1)}</span>
+        <span>${compactCountryForUpcoming(match, match.team1)}</span>
         <strong>${matchResultInline(match)}</strong>
-        <span>${compactKnockoutTeam(match.team2)}</span>
+        <span>${compactCountryForUpcoming(match, match.team2)}</span>
       </div>
       <div class="compact-game-meta">
         <span>${formatDate(match.date)} · ${match.time}</span>
@@ -2257,13 +2292,17 @@ function roundDeadline(round) {
     .filter((m) => m.round === round)
     .sort((a, b) => makeDate(a) - makeDate(b))[0];
 
-  if (!first) {
-    return new Date(8640000000000000);
+  const date = makeDate(first);
+  date.setMinutes(date.getMinutes() - getRoundLockMinutes());
+  return date;
+}
+
+function getRoundLockMinutes() {
+  if (Number.isFinite(Number(DATA.settings.lockMinutesBeforeRound))) {
+    return Number(DATA.settings.lockMinutesBeforeRound);
   }
 
-  const date = makeDate(first);
-  date.setMinutes(date.getMinutes() - Math.round(Number(DATA.settings.lockHoursBeforeRound || 0) * 60));
-  return date;
+  return Number(DATA.settings.lockHoursBeforeRound || 0) * 60;
 }
 
 function isRoundLocked(round) {
@@ -2304,6 +2343,101 @@ function isLiveMatch(match) {
 
 function makeDate(match) {
   return new Date(`${match.date}T${match.time}:00`);
+}
+
+function isKnockoutRound(round) {
+  return !groupStageRounds.includes(round);
+}
+
+function isUnresolvedTeamName(name) {
+  const value = String(name || "");
+  return /(?:Grupo|melhor|Vencedor|Perdedor|Time\s+[A-Z])/i.test(value);
+}
+
+function compactCountryForUpcoming(match, name) {
+  if (isKnockoutRound(match.round) && isUnresolvedTeamName(name)) {
+    return unresolvedTeamFlags(name);
+  }
+
+  return compactCountry(name);
+}
+
+function unresolvedTeamFlags(name) {
+  const teams = resolvePossibleTeams(name);
+  const flags = teams.map(flagMarkup).filter(Boolean).join("");
+
+  if (!flags) {
+    return `<span class="compact-country unresolved-flag-options" title="${escapeHtml(name)}"><span class="flag-fallback">?</span></span>`;
+  }
+
+  return `<span class="compact-country unresolved-flag-options" title="${escapeHtml(name)}">${flags}</span>`;
+}
+
+function resolvePossibleTeams(name, visited = new Set()) {
+  const value = String(name || "").trim();
+
+  if (!value) {
+    return [];
+  }
+
+  if (FLAG_POSITIONS[value]) {
+    return [value];
+  }
+
+  const gameReference = value.match(/(?:Vencedor|Perdedor)\s+Jogo\s+(\d+)/i);
+
+  if (gameReference) {
+    const number = Number(gameReference[1]);
+
+    if (visited.has(number)) {
+      return [];
+    }
+
+    visited.add(number);
+
+    const sourceMatch = DATA.matches.find((match) => Number(match.number) === number);
+
+    if (!sourceMatch) {
+      return [];
+    }
+
+    return uniqueValues([
+      ...resolvePossibleTeams(sourceMatch.team1, visited),
+      ...resolvePossibleTeams(sourceMatch.team2, visited)
+    ]);
+  }
+
+  const groupLetters = extractGroupLetters(value);
+
+  if (groupLetters.length) {
+    return uniqueValues(DATA.groups
+      .filter((group) => groupLetters.includes(group.id))
+      .flatMap((group) => group.teams || []));
+  }
+
+  return [];
+}
+
+function extractGroupLetters(value) {
+  const text = String(value || "").toUpperCase();
+  const letters = [];
+
+  text.replace(/GRUPO\s+([A-Z])/g, (_, letter) => {
+    letters.push(letter);
+    return "";
+  });
+
+  const bestMatch = text.match(/MELHOR\s+([A-Z](?:\/[A-Z])*)/);
+
+  if (bestMatch) {
+    bestMatch[1].split("/").forEach((letter) => letters.push(letter));
+  }
+
+  return uniqueValues(letters);
+}
+
+function uniqueValues(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function country(name) {
@@ -2387,21 +2521,6 @@ function countryCode(name) {
   return codes[name] || String(name || "").slice(0, 3).toUpperCase();
 }
 
-function compactKnockoutTeam(name) {
-  const text = String(name || "").trim();
-
-  if (text.includes(" ou ")) {
-    const flags = text
-      .split(/\s+ou\s+/i)
-      .map((team) => flagMarkup(team.trim()))
-      .join('<span class="knockout-or">ou</span>');
-
-    return `<span class="compact-country compact-country-flags-only">${flags}</span>`;
-  }
-
-  return compactCountry(text);
-}
-
 function compactVenue(venue) {
   const text = String(venue || "");
   const parts = text.split(" - ");
@@ -2478,14 +2597,10 @@ function isFinishedStatus(match) {
     match && match.elapsed
   ].join(' ').toLowerCase();
 
-  if (text.includes('half') || text.includes('intervalo')) {
-    return false;
-  }
-
   return text.includes('final') ||
     text.includes('finished') ||
     text.includes('encerrado') ||
-    /(^|\s)ft($|\s)/.test(text);
+    text.includes('ft');
 }
 
 function matchResultInline(match) {
