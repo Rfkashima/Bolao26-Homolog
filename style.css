@@ -2255,46 +2255,231 @@ iframe{
   }
 }
 
-/* Ajustes homologação: 4 abas e Inicio sem ranking */
+/* Ajustes consolidados: Ranking, Início, jogos simultâneos e homologação. */
 .main-tabs{
   grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
 }
 
 .main-tabs button[data-view="ranking"]::before{
-  content: "🏆";
+  content: "🥇" !important;
 }
 
 .main-tabs button[data-view="oficial"]::before{
-  content: "📋";
-}
-
-@media (min-width: 900px){
-  .main-tabs{
-    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
-  }
-}
-
-.home-finished-match-details{
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(0,167,255,.18);
+  content: "🌎" !important;
 }
 
 .ranking-page-card{
   width: 100%;
+  min-width: 0;
 }
 
-.compact-country-flags-only{
-  display: inline-flex;
+.next-round-deadline-card{
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 2px;
+  gap: 12px;
+  border-top-color: var(--amber);
+  padding-block: 11px;
+}
+
+.next-round-deadline-icon{
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 207, 58, .42);
+  border-radius: 13px;
+  background: rgba(255, 207, 58, .10);
+  font-size: 22px;
+}
+
+.next-round-deadline-content{
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 12px;
+}
+
+.next-round-deadline-label{
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.next-round-deadline-content strong{
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+
+.next-round-deadline-content > span:last-child{
+  color: #ffe58a;
+  font-size: 12px;
+  font-weight: 950;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.home-finished-match-details{
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 9px;
+  border-top: 1px solid rgba(255,255,255,.08);
+  padding-top: 8px;
+}
+
+.home-finished-match-details .live-event-list{
+  margin-top: 5px;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.home-finished-match-details + .player-picks{
+  margin-top: 10px;
+  border-top: 1px solid rgba(255,255,255,.08);
+  padding-top: 9px;
+}
+
+.live-games-list.has-simultaneous-games{
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.live-game-card[data-match-id]{
+  min-width: 0;
+}
+
+.compact-games{
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compact-game-main,
+.compact-game-main > span,
+.possible-flags{
+  min-width: 0;
   max-width: 100%;
 }
 
-.compact-country-flags-only .flag-sprite,
-.compact-country-placeholder .flag-sprite,
-.compact-country-placeholder .flag-fallback{
-  margin: 0;
+.possible-flags{
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.compact-game-main > span:first-child .possible-flags{
+  justify-content: flex-start;
+}
+
+.compact-game-main > span:last-child .possible-flags{
+  justify-content: flex-end;
+}
+
+.possible-separator{
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.live-score-team .country > span:last-child{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px){
+  .main-tabs{
+    gap: 4px !important;
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+  }
+
+  .main-tabs button{
+    min-height: 48px !important;
+    padding-inline: 2px !important;
+    font-size: 9px !important;
+  }
+
+  .main-tabs button::before{
+    font-size: 17px !important;
+  }
+
+  .next-round-deadline-card{
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 9px;
+  }
+
+  .next-round-deadline-icon{
+    width: 38px;
+    height: 38px;
+    font-size: 19px;
+  }
+
+  .next-round-deadline-content{
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .next-round-deadline-content > span:last-child{
+    text-align: left;
+    white-space: normal;
+  }
+
+  .live-games-list.has-simultaneous-games,
+  .compact-games{
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .live-scoreboard{
+    grid-template-columns: minmax(0, 1fr) 30px 48px 30px minmax(0, 1fr) !important;
+    gap: 3px !important;
+    min-height: 62px;
+    padding-inline: 0;
+  }
+
+  .live-score-number{
+    font-size: 22px;
+  }
+
+  .live-score-team{
+    font-size: 11px;
+  }
+
+  .live-score-team .country{
+    gap: 3px;
+  }
+
+  .live-score-team .flag-sprite{
+    margin-right: 2px;
+  }
+
+  .compact-game-main{
+    grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr);
+    gap: 5px;
+  }
+
+  .possible-flags{
+    gap: 3px;
+  }
+
+  .possible-flags .flag-sprite,
+  .possible-flags .flag-fallback{
+    transform: scale(.88);
+    transform-origin: center;
+  }
+}
+
+/* Evita mudanças de altura e cartões vazios durante a rolagem na página inicial. */
+.home-match-picks-section .pick-card,
+.home-match-picks-section .player-pick,
+.upcoming-card .compact-game,
+.live-section .live-game-card{
+  content-visibility: visible !important;
+  contain-intrinsic-size: auto !important;
 }
