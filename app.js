@@ -5,6 +5,7 @@ const LIVE_REFRESH_MS = 15000;
 const BASE_STATE_STALE_MS = 5 * 60 * 1000;
 const UPCOMING_FEATURE_WINDOW_MS = 30 * 60 * 1000;
 const ACTIVE_MATCH_GRACE_MS = 4 * 60 * 60 * 1000;
+const LIVE_SOURCE_FRESH_MS = 10 * 60 * 1000;
 const RECENT_FINISHED_DETAILS_MS = 8 * 60 * 60 * 1000;
 
 const state = {
@@ -18,13 +19,15 @@ const state = {
   homePicksMatchId: "",
   homePicksManual: false,
   loadedBackend: false,
-  saveInFlight: false
+  saveInFlight: false,
+  rankingRange: localStorage.getItem("bolao-ranking-range") || "last10"
 };
 
 const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
 let liveRefreshTimer = null;
 let homeMatchTransitionTimer = null;
+let deadlineRefreshTimer = null;
 let baseRequestPromise = null;
 let liveRequestPromise = null;
 let deferredBackendRender = false;
@@ -39,12 +42,23 @@ const ROUND_LABELS = {
   "Rodada 1": "Rodada 1",
   "Rodada 2": "Rodada 2",
   "Rodada 3": "Rodada 3",
-  "Rodada 4": "Mata-mata · 32 avos",
+  "Rodada 4": "16 avos de final",
   "Rodada 5": "Oitavas de final",
   "Rodada 6": "Quartas de final",
   "Rodada 7": "Semifinais",
   "Rodada 8": "Final e 3º lugar"
 };
+
+const ROUND_MATCH_COUNTS = Object.freeze({
+  "Rodada 1": 24,
+  "Rodada 2": 24,
+  "Rodada 3": 24,
+  "Rodada 4": 16,
+  "Rodada 5": 8,
+  "Rodada 6": 4,
+  "Rodada 7": 2,
+  "Rodada 8": 2
+});
 
 const SHORT_COUNTRY_NAMES = {
   "República Tcheca": "Rep. Tcheca",
@@ -366,6 +380,29 @@ function mergeMatches(list) {
     if (remote.sourceStatus !== undefined) match.sourceStatus = remote.sourceStatus;
     if (remote.sourceUpdatedAt !== undefined) match.sourceUpdatedAt = remote.sourceUpdatedAt;
     if (remote.statistics !== undefined) match.statistics = remote.statistics;
+    if (remote.team1 !== undefined && remote.team1 !== "") match.team1 = remote.team1;
+    if (remote.team2 !== undefined && remote.team2 !== "") match.team2 = remote.team2;
+
+    [
+      "scoreAfterExtraTime1",
+      "scoreAfterExtraTime2",
+      "scoreBeforePenalties1",
+      "scoreBeforePenalties2",
+      "regulationPlusExtraTime1",
+      "regulationPlusExtraTime2",
+      "betScore1",
+      "betScore2",
+      "penaltyScore1",
+      "penaltyScore2",
+      "penalties1",
+      "penalties2",
+      "shootoutScore1",
+      "shootoutScore2"
+    ].forEach((field) => {
+      if (remote[field] !== undefined && remote[field] !== "") {
+        match[field] = remote[field];
+      }
+    });
   });
 }
 
@@ -462,18 +499,21 @@ function refreshAfterLiveUpdate() {
   if (state.view === "inicio") {
     const liveSlot = $("#home-live-slot");
     const picksSlot = $("#home-picks-slot");
-    const rankingSlot = $("#home-ranking-slot");
 
-    if (!liveSlot || !picksSlot || !rankingSlot) {
+    if (!liveSlot || !picksSlot) {
       renderHome();
       return;
     }
 
     liveSlot.innerHTML = renderLiveSection();
     picksSlot.innerHTML = renderHomeMatchPicksSection();
-    rankingSlot.innerHTML = renderHomeRankingSection();
     bindHomeEvents();
     scheduleHomeMatchTransition();
+    return;
+  }
+
+  if (state.view === "ranking") {
+    renderRanking();
     return;
   }
 
@@ -495,10 +535,18 @@ function backendVisualSignature(payload) {
         status: match.status || "",
         elapsed: match.elapsed || "",
         injuryTime: match.injuryTime || "",
+        team1: match.team1 || "",
+        team2: match.team2 || "",
         homeScorers: match.homeScorers || [],
         awayScorers: match.awayScorers || [],
         events: match.events || [],
-        statistics: match.statistics || {}
+        statistics: match.statistics || {},
+        scoreAfterExtraTime1: match.scoreAfterExtraTime1 ?? null,
+        scoreAfterExtraTime2: match.scoreAfterExtraTime2 ?? null,
+        scoreBeforePenalties1: match.scoreBeforePenalties1 ?? null,
+        scoreBeforePenalties2: match.scoreBeforePenalties2 ?? null,
+        penaltyScore1: match.penaltyScore1 ?? match.penalties1 ?? match.shootoutScore1 ?? null,
+        penaltyScore2: match.penaltyScore2 ?? match.penalties2 ?? match.shootoutScore2 ?? null
       };
     });
   }
@@ -622,6 +670,8 @@ function submitBackend(payload) {
     playerId: payload.playerId,
     playerCode: payload.playerCode,
     round: payload.round,
+    deadline: roundDeadline(payload.round).toISOString(),
+    lockMinutesBeforeRound: Number(DATA.settings.lockMinutesBeforeRound ?? 15),
     picks: payload.picks.map((pick) => ({
       m: pick.matchId,
       a: pick.g1,
@@ -635,6 +685,16 @@ function submitBackend(payload) {
 
 function render() {
   setActiveTab();
+
+  if (deadlineRefreshTimer && state.view !== "inicio" && state.view !== "palpites") {
+    window.clearInterval(deadlineRefreshTimer);
+    deadlineRefreshTimer = null;
+  }
+
+  if (state.view === "ranking") {
+    renderRanking();
+    return;
+  }
 
   if (state.view === "oficial") {
     renderOfficial();
@@ -653,50 +713,399 @@ function renderHome() {
   app.innerHTML = `
     <div class="stack">
       <div id="home-live-slot">${renderLiveSection()}</div>
+      ${renderNextRoundDeadlineSection()}
       <div id="home-picks-slot">${renderHomeMatchPicksSection()}</div>
-      <div class="home-dashboard-grid">
-        ${renderUpcomingGamesSection()}
-        <div id="home-ranking-slot">${renderHomeRankingSection()}</div>
-      </div>
+      ${renderUpcomingGamesSection()}
     </div>
   `;
 
   bindHomeEvents();
   scheduleHomeMatchTransition();
+  scheduleDeadlineRefresh();
 }
 
-function renderHomeRankingSection() {
+function renderRanking() {
+  const allowedRanges = ["last10", "all", "groups", "knockout"];
+  if (!allowedRanges.includes(state.rankingRange)) {
+    state.rankingRange = "last10";
+  }
+
+  app.innerHTML = `
+    <div class="stack">
+      <section class="card ranking-current-card">
+        <div class="title-row">
+          <h2>🏆 Ranking dos players</h2>
+          <span class="kicker">Classificação atual</span>
+        </div>
+        ${rankingTable(calculateRanking())}
+      </section>
+
+      <section class="card ranking-page-card">
+        <div class="title-row">
+          <h2>📈 Variação de posições</h2>
+          <span class="kicker">Por jogo</span>
+        </div>
+
+        <div class="ranking-filter-buttons" role="group" aria-label="Período do gráfico de ranking">
+          ${rankingFilterButton("last10", "Últimos 10 jogos")}
+          ${rankingFilterButton("all", "Desde sempre")}
+          ${rankingFilterButton("groups", "Apenas grupos")}
+          ${rankingFilterButton("knockout", "Apenas Mata-mata")}
+        </div>
+
+        ${renderRankingEvolutionChart(state.rankingRange)}
+      </section>
+
+      ${renderSponsorBlock(true)}
+    </div>
+  `;
+
+  bindRankingEvents();
+}
+
+function rankingFilterButton(value, label) {
+  const active = state.rankingRange === value;
   return `
-    <section class="card home-ranking-card">
-      <div class="title-row">
-        <h2>🏆 Ranking dos players</h2>
-        <span class="kicker">Classificação atual</span>
+    <button
+      type="button"
+      class="ranking-filter-button ${active ? "active" : ""}"
+      data-ranking-range="${value}"
+      aria-pressed="${active ? "true" : "false"}"
+    >${label}</button>
+  `;
+}
+
+function bindRankingEvents() {
+  document.querySelectorAll("[data-ranking-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const range = button.dataset.rankingRange || "last10";
+      state.rankingRange = range;
+      localStorage.setItem("bolao-ranking-range", range);
+      renderRanking();
+      setActiveTab();
+    });
+  });
+}
+
+function getCompletedRankedMatches(range) {
+  let completed = DATA.matches
+    .filter((match) => {
+      const score = getPredictionScore(match);
+      return score.home !== null && score.away !== null && !isFutureScheduledMatch(match);
+    })
+    .sort((first, second) => {
+      return makeDate(first).getTime() - makeDate(second).getTime() ||
+        Number(first.number || 0) - Number(second.number || 0);
+    });
+
+  if (range === "groups") {
+    completed = completed.filter((match) => groupStageRounds.includes(match.round));
+  } else if (range === "knockout") {
+    completed = completed.filter((match) => !groupStageRounds.includes(match.round));
+  } else if (range === "last10") {
+    completed = completed.slice(-10);
+  }
+
+  return completed;
+}
+
+function buildRankingAtMatches(matches) {
+  const matchIds = new Set(matches.map((match) => match.id));
+
+  return DATA.players.map((player) => {
+    let points = 0;
+    let exacts = 0;
+
+    DATA.matches.forEach((match) => {
+      if (!matchIds.has(match.id)) return;
+      const scored = scorePick(state.picks[player.id]?.[match.id], match);
+      points += scored.points;
+      exacts += scored.exact ? 1 : 0;
+    });
+
+    return { id: player.id, name: player.name, points, exacts };
+  }).sort((first, second) => {
+    return second.points - first.points ||
+      second.exacts - first.exacts ||
+      first.name.localeCompare(second.name);
+  });
+}
+
+function renderRankingEvolutionChart(range) {
+  const matches = getCompletedRankedMatches(range);
+
+  if (!matches.length) {
+    const message = range === "knockout"
+      ? "O gráfico do Mata-mata aparecerá após o primeiro jogo finalizado."
+      : "O gráfico aparecerá após o primeiro jogo finalizado.";
+    return `<div class="info-box ranking-chart-empty">${message}</div>`;
+  }
+
+  const allCompletedMatches = getCompletedRankedMatches("all");
+  const snapshots = matches.map((match) => {
+    const absoluteIndex = allCompletedMatches.findIndex((item) => item.id === match.id);
+    const ranking = buildRankingAtMatches(
+      allCompletedMatches.slice(0, Math.max(0, absoluteIndex) + 1)
+    );
+
+    return {
+      match,
+      positions: new Map(ranking.map((player, position) => [player.id, position + 1]))
+    };
+  });
+
+  const chartHeight = 500;
+  const top = 30;
+  const bottom = 62;
+  const left = 54;
+  const right = 128;
+  const pointGap = range === "all" ? 54 : 86;
+  const chartWidth = Math.max(760, left + right + Math.max(1, matches.length - 1) * pointGap);
+  const plotHeight = chartHeight - top - bottom;
+  const plotWidth = chartWidth - left - right;
+  const xFor = (index) => matches.length === 1
+    ? left + plotWidth / 2
+    : left + index * (plotWidth / (matches.length - 1));
+  const yFor = (position) => top + ((position - 1) / Math.max(1, DATA.players.length - 1)) * plotHeight;
+  const labelEvery = Math.max(1, Math.ceil(matches.length / 10));
+
+  const grid = DATA.players.map((_, index) => {
+    const position = index + 1;
+    const y = yFor(position);
+    return `
+      <line class="ranking-chart-grid-line" x1="${left}" y1="${y}" x2="${chartWidth - right}" y2="${y}"></line>
+      <text class="ranking-chart-rank-label" x="${left - 14}" y="${y + 4}" text-anchor="end">${position}º</text>
+    `;
+  }).join("");
+
+  const series = DATA.players.map((player, playerIndex) => {
+    const points = snapshots.map((snapshot, index) => ({
+      x: xFor(index),
+      y: yFor(snapshot.positions.get(player.id) || DATA.players.length),
+      position: snapshot.positions.get(player.id) || DATA.players.length,
+      match: snapshot.match
+    }));
+    const hue = Math.round((playerIndex * 360) / DATA.players.length);
+    const pointString = points.map((point) => `${point.x},${point.y}`).join(" ");
+    const last = points[points.length - 1];
+
+    return `
+      <g class="ranking-chart-player" style="--ranking-player-color:hsl(${hue} 82% 62%)">
+        <polyline class="ranking-chart-line" points="${pointString}"></polyline>
+        ${points.map((point) => `
+          <circle class="ranking-chart-point" cx="${point.x}" cy="${point.y}" r="4">
+            <title>${escapeHtml(player.name)}: ${point.position}º após o Jogo ${point.match.number}</title>
+          </circle>
+        `).join("")}
+        <text class="ranking-chart-end-label" x="${last.x + 10}" y="${last.y + 4}">${escapeHtml(player.name)}</text>
+      </g>
+    `;
+  }).join("");
+
+  const xLabels = matches.map((match, index) => {
+    const shouldShow = index === 0 || index === matches.length - 1 || index % labelEvery === 0;
+    if (!shouldShow) return "";
+    const x = xFor(index);
+    return `
+      <text class="ranking-chart-game-label" x="${x}" y="${chartHeight - 28}" text-anchor="middle">J${match.number}</text>
+    `;
+  }).join("");
+
+  return `
+    <div class="ranking-chart-summary">
+      <strong>${matches.length} jogo${matches.length === 1 ? "" : "s"}</strong>
+      <span>Posição 1 no topo; passe o cursor ou toque nos pontos para ver o jogo.</span>
+    </div>
+    <div class="ranking-chart-scroll" tabindex="0" aria-label="Gráfico de variação do ranking por jogo">
+      <svg class="ranking-chart" viewBox="0 0 ${chartWidth} ${chartHeight}" width="${chartWidth}" height="${chartHeight}" role="img" aria-label="Variação da posição de cada jogador no ranking">
+        ${grid}
+        ${series}
+        ${xLabels}
+      </svg>
+    </div>
+  `;
+}
+
+function getRoundSchedule() {
+  return rounds
+    .map((round) => {
+      const matches = DATA.matches
+        .filter((match) => match.round === round)
+        .sort((first, second) => makeDate(first) - makeDate(second));
+
+      return {
+        round,
+        matches,
+        firstKickoff: matches.length ? makeDate(matches[0]).getTime() : Number.NaN,
+        lastKickoff: matches.length ? makeDate(matches[matches.length - 1]).getTime() : Number.NaN
+      };
+    })
+    .filter((item) => item.matches.length)
+    .sort((first, second) => first.firstKickoff - second.firstKickoff);
+}
+
+function getCurrentRoundIndex() {
+  const schedule = getRoundSchedule();
+
+  if (!schedule.length) {
+    return -1;
+  }
+
+  const liveRound = DATA.matches
+    .filter((match) => isLiveMatch(match))
+    .sort((first, second) => makeDate(first) - makeDate(second))[0]?.round;
+
+  if (liveRound) {
+    const liveIndex = schedule.findIndex((item) => item.round === liveRound);
+    if (liveIndex >= 0) return liveIndex;
+  }
+
+  const now = Date.now();
+  let latestStartedIndex = -1;
+
+  schedule.forEach((item, index) => {
+    if (Number.isFinite(item.firstKickoff) && item.firstKickoff <= now) {
+      latestStartedIndex = index;
+    }
+  });
+
+  if (latestStartedIndex < 0) {
+    return 0;
+  }
+
+  if (latestStartedIndex < schedule.length - 1) {
+    const currentRound = schedule[latestStartedIndex];
+    const allMatchesFinished = currentRound.matches.every((match) => isFinishedStatus(match));
+    const scheduledWindowEnded = Number.isFinite(currentRound.lastKickoff) &&
+      now > currentRound.lastKickoff + ACTIVE_MATCH_GRACE_MS;
+
+    if (allMatchesFinished || scheduledWindowEnded) {
+      return latestStartedIndex + 1;
+    }
+  }
+
+  return latestStartedIndex;
+}
+
+function getCurrentRoundName() {
+  const schedule = getRoundSchedule();
+  const index = getCurrentRoundIndex();
+  return schedule[index]?.round || schedule[0]?.round || rounds[0] || "";
+}
+
+function getNextRoundInfo() {
+  const schedule = getRoundSchedule();
+  const currentIndex = getCurrentRoundIndex();
+
+  if (currentIndex < 0 || currentIndex >= schedule.length - 1) {
+    return null;
+  }
+
+  return schedule[currentIndex + 1];
+}
+
+function renderNextRoundDeadlineSection() {
+  const nextRound = getNextRoundInfo();
+
+  if (!nextRound) {
+    return "";
+  }
+
+  const deadline = roundDeadline(nextRound.round);
+
+  if (Number.isNaN(deadline.getTime())) {
+    return "";
+  }
+
+  return `
+    <section class="card next-round-deadline-card" data-deadline-round="${escapeHtml(nextRound.round)}">
+      <div class="next-round-deadline-icon" aria-hidden="true">⏰</div>
+      <div class="next-round-deadline-content">
+        <span class="next-round-deadline-label">Fechamento da próxima rodada</span>
+        <strong>${escapeHtml(displayRound(nextRound.round))}</strong>
+        <span class="next-round-deadline-date">${formatDateTime(deadline)}</span>
+        <span class="round-deadline-countdown" data-deadline-time="${deadline.getTime()}">${formatDeadlineCountdown(deadline)}</span>
       </div>
-      ${rankingTable(calculateRanking())}
     </section>
   `;
+}
+
+function formatDeadlineCountdown(deadline) {
+  const remaining = deadline.getTime() - Date.now();
+
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    return "Prazo encerrado";
+  }
+
+  const totalMinutes = Math.max(1, Math.ceil(remaining / 60000));
+
+  if (totalMinutes >= 24 * 60) {
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    return `Faltam ${days} dia${days === 1 ? "" : "s"}${hours ? ` e ${hours}h` : ""}`;
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return `Faltam ${hours}h${minutes ? ` ${minutes}min` : ""}`;
+  }
+
+  return `Faltam ${minutes} minuto${minutes === 1 ? "" : "s"}`;
+}
+
+function updateDeadlineCountdowns() {
+  document.querySelectorAll(".round-deadline-countdown[data-deadline-time]").forEach((element) => {
+    const timestamp = Number(element.dataset.deadlineTime);
+    element.textContent = formatDeadlineCountdown(new Date(timestamp));
+  });
+}
+
+function scheduleDeadlineRefresh() {
+  if (deadlineRefreshTimer) {
+    window.clearInterval(deadlineRefreshTimer);
+    deadlineRefreshTimer = null;
+  }
+
+  updateDeadlineCountdowns();
+  deadlineRefreshTimer = window.setInterval(updateDeadlineCountdowns, 30000);
 }
 
 function getNextScheduledMatch() {
   const now = Date.now();
 
   return DATA.matches
-    .filter((match) => isFutureScheduledMatch(match) && makeDate(match).getTime() > now)
+    .filter((match) => !isLiveMatch(match) && !isFinishedStatus(match) && makeDate(match).getTime() > now)
     .sort((a, b) => makeDate(a) - makeDate(b))[0] || null;
 }
 
-function getImminentUpcomingMatch() {
-  const nextMatch = getNextScheduledMatch();
+function getFeaturedPendingMatches() {
+  const now = Date.now();
+  const candidates = DATA.matches
+    .filter((match) => {
+      if (!match || isLiveMatch(match) || isFinishedStatus(match)) return false;
 
-  if (!nextMatch) {
-    return null;
+      const kickoff = makeDate(match).getTime();
+      return Number.isFinite(kickoff) &&
+        kickoff >= now - ACTIVE_MATCH_GRACE_MS &&
+        kickoff <= now + UPCOMING_FEATURE_WINDOW_MS;
+    })
+    .sort((first, second) => {
+      return makeDate(first).getTime() - makeDate(second).getTime() ||
+        Number(first.number || 0) - Number(second.number || 0);
+    });
+
+  if (!candidates.length) {
+    return [];
   }
 
-  const timeUntilKickoff = makeDate(nextMatch).getTime() - Date.now();
+  const alreadyStarted = candidates.filter((match) => makeDate(match).getTime() <= now);
+  const anchorKickoff = alreadyStarted.length
+    ? Math.max(...alreadyStarted.map((match) => makeDate(match).getTime()))
+    : makeDate(candidates[0]).getTime();
 
-  return timeUntilKickoff >= 0 && timeUntilKickoff <= UPCOMING_FEATURE_WINDOW_MS
-    ? nextMatch
-    : null;
+  return candidates.filter((match) => makeDate(match).getTime() === anchorKickoff);
 }
 
 function scheduleHomeMatchTransition() {
@@ -740,7 +1149,7 @@ function getHomeReferenceMatch() {
     .filter((match) => isLiveMatch(match))
     .sort((a, b) => makeDate(a) - makeDate(b))[0];
 
-  return liveMatch || getImminentUpcomingMatch() || getLastFinishedMatch();
+  return liveMatch || getFeaturedPendingMatches()[0] || getLastFinishedMatch();
 }
 
 function getChronologicalMatches() {
@@ -796,7 +1205,7 @@ function renderHomeMatchPicksSection() {
     <section class="card home-match-picks-section">
       <div class="title-row home-picks-title-row">
         <h2>🎯 Palpites</h2>
-        <span class="kicker">${isLive ? "Jogo ao vivo" : isUpcoming ? "Próximo jogo" : "Jogo anterior"}</span>
+        <span class="kicker">${isLive ? "Jogo ao vivo" : isUpcoming ? "Próximo jogo" : "Jogo finalizado"}</span>
       </div>
 
       <div class="home-picks-navigation" aria-label="Navegação entre os jogos">
@@ -828,7 +1237,6 @@ function renderHomeMatchPicksSection() {
         </div>
 
         ${matchLine(match)}
-
         ${renderHomeFinishedMatchDetails(match)}
 
         ${roundClosed
@@ -837,10 +1245,11 @@ function renderHomeMatchPicksSection() {
                 const pick = state.picks[player.id]?.[match.id];
 
                 return `
-                  <div class="player-pick">
+                  <div class="player-pick ${playerPickClass(pick, match)}">
                     <span class="player-pick-name">${player.name}</span>
                     <span class="player-pick-score">${formatPick(pick)}</span>
                     <span class="player-pick-date">${formatPickLastSaved(pick)}</span>
+                    ${playerPickResultBadge(pick, match)}
                   </div>
                 `;
               }).join("")}
@@ -900,83 +1309,118 @@ function bindHomeEvents() {
   next?.addEventListener("click", () => selectByOffset(1));
 }
 
-function renderLiveSection() {
+function getDisplayedLiveMatches() {
   const liveMatches = DATA.matches
     .filter((match) => isLiveMatch(match))
-    .sort((a, b) => makeDate(a) - makeDate(b));
+    .sort((first, second) => {
+      return makeDate(first).getTime() - makeDate(second).getTime() ||
+        Number(first.number || 0) - Number(second.number || 0);
+    });
 
   if (!liveMatches.length) {
-    const upcomingMatch = getImminentUpcomingMatch();
+    return getFeaturedPendingMatches();
+  }
 
-    if (upcomingMatch) {
-      return renderImminentUpcomingMatch(upcomingMatch);
-    }
+  const liveKickoffs = new Set(liveMatches.map((match) => makeDate(match).getTime()));
+  const now = Date.now();
+  const pairedPendingMatches = DATA.matches.filter((match) => {
+    if (!match || isLiveMatch(match) || isFinishedStatus(match)) return false;
 
-    const lastMatch = getLastFinishedMatch();
+    const kickoff = makeDate(match).getTime();
+    return liveKickoffs.has(kickoff) &&
+      kickoff <= now &&
+      kickoff >= now - ACTIVE_MATCH_GRACE_MS;
+  });
 
-    if (!lastMatch) {
-      return `
-        <section class="card live-empty-card">
-          <div class="live-empty-line">
-            <h2>🔴 Ao vivo</h2>
-            <span>Nenhum jogo agora</span>
-          </div>
-        </section>
-      `;
-    }
+  return [...liveMatches, ...pairedPendingMatches]
+    .filter((match, index, list) => list.findIndex((item) => item.id === match.id) === index)
+    .sort((first, second) => {
+      return makeDate(first).getTime() - makeDate(second).getTime() ||
+        Number(first.number || 0) - Number(second.number || 0);
+    });
+}
 
-    return renderLastFinishedMatch(lastMatch);
+function renderLiveSection() {
+  const displayedMatches = getDisplayedLiveMatches();
+
+  if (!displayedMatches.length) {
+    return "";
   }
 
   return `
-    <section class="card live-section">
+    <div class="live-match-panels ${displayedMatches.length > 1 ? "has-simultaneous-games" : ""}">
+      ${displayedMatches.map((match) => renderLiveMatchPanel(match, displayedMatches.length)).join("")}
+    </div>
+  `;
+}
+
+function renderLiveMatchPanel(match, totalMatches) {
+  const live = isLiveMatch(match);
+  const interrupted = isInterruptedMatch(match);
+  const kickoff = makeDate(match).getTime();
+  const kicker = live
+    ? interrupted
+      ? "Jogo interrompido"
+      : totalMatches > 1
+        ? `Jogo ${match.number} em andamento`
+        : "Atualização ESPN"
+    : kickoff <= Date.now()
+      ? "Aguardando atualização ESPN"
+      : "Começa em até 30 minutos";
+
+  return `
+    <section class="card live-section live-match-panel ${live ? "" : "upcoming-featured-section"}" data-match-id="${escapeHtml(match.id)}">
       <div class="title-row">
         <h2>🔴 Ao vivo</h2>
+        <span class="kicker">${escapeHtml(kicker)}</span>
       </div>
 
-      <div class="games-list">
-        ${liveMatches.map(liveGameCard).join("")}
-      </div>
+      ${liveGameCard(match, live)}
     </section>
   `;
 }
 
-function renderImminentUpcomingMatch(match) {
+function liveGameCard(match, includePicks) {
+  const live = isLiveMatch(match);
+
   return `
-    <section class="card live-section upcoming-featured-section">
-      <div class="title-row">
-        <h2>⏳ Próximo jogo</h2>
-        <span class="kicker">Começa em até 30 minutos</span>
-      </div>
-
-      <div class="games-list">
-        <div class="game-card live-game-card upcoming-featured-card">
-          <div class="game-top">
-            <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-            <span>${formatDate(match.date)} · ${match.time}</span>
-          </div>
-
-          ${matchLine(match)}
-
-          <div class="muted live-venue">${escapeHtml(match.venue || "")}</div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function liveGameCard(match) {
-  return `
-    <div class="game-card live-game-card">
+    <div class="live-game-card ${live ? "" : "upcoming-featured-card"}" data-match-id="${escapeHtml(match.id)}">
       <div class="game-top">
         <span>${displayRound(match.round)} · Jogo ${match.number}</span>
         <span>${formatDate(match.date)} · ${match.time}</span>
       </div>
 
-      ${liveMatchLine(match)}
-      ${liveMatchDetails(match)}
+      ${live ? liveMatchLine(match) : matchLine(match)}
+      ${live ? liveMatchDetails(match) : ""}
+      ${includePicks ? renderLiveMatchPicks(match) : ""}
 
       <div class="muted live-venue">${escapeHtml(match.venue || "")}</div>
+    </div>
+  `;
+}
+
+function renderLiveMatchPicks(match) {
+  if (!isRoundLocked(match.round)) {
+    return `<div class="notice picks-locked-notice live-picks-locked">🔒 Os palpites serão exibidos após o fechamento da rodada.</div>`;
+  }
+
+  return `
+    <div class="live-match-picks-block">
+      <div class="live-match-picks-title">Palpites</div>
+      <div class="player-picks live-player-picks">
+        ${DATA.players.map((player) => {
+          const pick = state.picks[player.id]?.[match.id];
+
+          return `
+            <div class="player-pick ${playerPickClass(pick, match)}">
+              <span class="player-pick-name">${player.name}</span>
+              <span class="player-pick-score">${formatPick(pick)}</span>
+              <span class="player-pick-date">${formatPickLastSaved(pick)}</span>
+              ${playerPickResultBadge(pick, match)}
+            </div>
+          `;
+        }).join("")}
+      </div>
     </div>
   `;
 }
@@ -1072,17 +1516,30 @@ function renderLastFinishedMatch(match) {
   `;
 }
 
+function getUpcomingGamesLimit() {
+  const currentRound = getCurrentRoundName();
+
+  if (currentRound === "Rodada 1") return 4;
+  if (currentRound === "Rodada 2") return 5;
+  if (currentRound === "Rodada 3") return 8;
+  return 2;
+}
+
 function renderUpcomingGamesSection() {
+  const limit = getUpcomingGamesLimit();
   const upcoming = DATA.matches
     .filter((match) => isFutureScheduledMatch(match))
-    .sort((a, b) => makeDate(a) - makeDate(b))
-    .slice(0, 5);
+    .sort((first, second) => {
+      return makeDate(first).getTime() - makeDate(second).getTime() ||
+        Number(first.number || 0) - Number(second.number || 0);
+    })
+    .slice(0, limit);
 
   return `
     <section class="card upcoming-card">
       <div class="title-row">
         <h2>⏭️ Próximos jogos</h2>
-        <span class="kicker">5 próximos</span>
+        <span class="kicker">${limit} próximos</span>
       </div>
 
       ${upcoming.length
@@ -1093,13 +1550,167 @@ function renderUpcomingGamesSection() {
   `;
 }
 
+function isKnownTeamName(name) {
+  return Boolean(FLAG_POSITIONS[String(name || "")]);
+}
+
+function uniqueTeamNames(names) {
+  return [...new Set((names || []).filter((name) => isKnownTeamName(name)))];
+}
+
+function isGroupStageComplete(groupId) {
+  const groupName = `Grupo ${groupId}`;
+  const groupMatches = DATA.matches.filter((match) => {
+    return match.group === groupName && groupStageRounds.includes(match.round);
+  });
+
+  return groupMatches.length > 0 && groupMatches.every((match) => {
+    const score = getPredictionScore(match);
+    return isFinishedStatus(match) || (score.home !== null && score.away !== null && makeDate(match).getTime() < Date.now());
+  });
+}
+
+function groupPositionCandidate(label) {
+  const match = String(label || "").match(/^(1|2|3)o Grupo ([A-L])$/i);
+
+  if (!match) {
+    return [];
+  }
+
+  const position = Number(match[1]);
+  const groupId = match[2].toUpperCase();
+  const standings = calculateGroupStandings()[groupId] || [];
+
+  if (isGroupStageComplete(groupId) && standings[position - 1]) {
+    return [standings[position - 1].team];
+  }
+
+  const group = DATA.groups.find((item) => item.id === groupId);
+  return uniqueTeamNames(group?.teams || []);
+}
+
+function bestThirdCandidates(label) {
+  const match = String(label || "").match(/^3o melhor ([A-L](?:\/[A-L])+)$/i);
+
+  if (!match) {
+    return [];
+  }
+
+  const standings = calculateGroupStandings();
+  return uniqueTeamNames(
+    match[1].split("/").map((groupId) => standings[groupId.toUpperCase()]?.[2]?.team)
+  );
+}
+
+function knockoutOutcomeTeam(sourceMatch, outcomeType) {
+  if (!sourceMatch || !isFinishedStatus(sourceMatch)) {
+    return "";
+  }
+
+  const score = getPredictionScore(sourceMatch);
+
+  if (score.home === null || score.away === null) {
+    return "";
+  }
+
+  let homeWon = score.home > score.away;
+  let awayWon = score.away > score.home;
+
+  if (!homeWon && !awayWon) {
+    const homePenalties = numericMatchValue(sourceMatch, ["penaltyScore1", "penalties1", "shootoutScore1"]);
+    const awayPenalties = numericMatchValue(sourceMatch, ["penaltyScore2", "penalties2", "shootoutScore2"]);
+
+    if (homePenalties !== null && awayPenalties !== null) {
+      homeWon = homePenalties > awayPenalties;
+      awayWon = awayPenalties > homePenalties;
+    }
+  }
+
+  if (!homeWon && !awayWon) {
+    return "";
+  }
+
+  if (outcomeType === "winner") {
+    return homeWon ? sourceMatch.team1 : sourceMatch.team2;
+  }
+
+  return homeWon ? sourceMatch.team2 : sourceMatch.team1;
+}
+
+function resolveTeamCandidates(label, visited = new Set()) {
+  const value = String(label || "").trim();
+
+  if (!value || visited.has(value)) {
+    return [];
+  }
+
+  if (isKnownTeamName(value)) {
+    return [value];
+  }
+
+  const groupCandidates = groupPositionCandidate(value);
+  if (groupCandidates.length) {
+    return groupCandidates;
+  }
+
+  const thirdCandidates = bestThirdCandidates(value);
+  if (thirdCandidates.length) {
+    return thirdCandidates;
+  }
+
+  const sourceReference = value.match(/^(Vencedor|Perdedor) Jogo (\d+)$/i);
+
+  if (!sourceReference) {
+    return [];
+  }
+
+  visited.add(value);
+  const sourceMatch = DATA.matches.find((match) => Number(match.number) === Number(sourceReference[2]));
+  const outcomeType = sourceReference[1].toLowerCase().startsWith("v") ? "winner" : "loser";
+  const resolvedOutcome = knockoutOutcomeTeam(sourceMatch, outcomeType);
+
+  if (isKnownTeamName(resolvedOutcome)) {
+    return [resolvedOutcome];
+  }
+
+  return uniqueTeamNames([
+    ...resolveTeamCandidates(sourceMatch?.team1, new Set(visited)),
+    ...resolveTeamCandidates(sourceMatch?.team2, new Set(visited))
+  ]);
+}
+
+function compactPossibleTeams(label) {
+  const candidates = resolveTeamCandidates(label);
+
+  if (isKnownTeamName(label)) {
+    return compactCountry(label);
+  }
+
+  if (candidates.length === 1) {
+    return compactCountry(candidates[0]);
+  }
+
+  if (!candidates.length) {
+    return `<span class="possible-flags"><span class="flag-fallback" aria-label="Adversário a definir">?</span></span>`;
+  }
+
+  return `
+    <span class="possible-flags" aria-label="Possíveis adversários">
+      ${candidates.map((team, index) => `
+        ${index ? `<span class="possible-separator">ou</span>` : ""}
+        ${flagMarkup(team)}
+      `).join("")}
+    </span>
+  `;
+}
+
 function compactGameCard(match) {
   return `
-    <div class="compact-game">
+    <div class="compact-game" data-match-id="${escapeHtml(match.id)}">
       <div class="compact-game-main">
-        <span>${compactCountry(match.team1)}</span>
-        <strong>${matchResultInline(match)}</strong>
-        <span>${compactCountry(match.team2)}</span>
+        <span>${compactPossibleTeams(match.team1)}</span>
+        <strong>x</strong>
+        <span>${compactPossibleTeams(match.team2)}</span>
       </div>
       <div class="compact-game-meta">
         <span>${formatDate(match.date)} · ${match.time}</span>
@@ -1132,12 +1743,14 @@ function renderOfficial() {
 function renderPicksArea() {
   app.innerHTML = `
     <div class="stack">
+      ${renderNextRoundDeadlineSection()}
       ${renderBetSection()}
       ${renderPicksSection()}
       ${renderSponsorBlock(true)}
     </div>
   `;
   bindEvents();
+  scheduleDeadlineRefresh();
 }
 
 function renderSponsorBlock(compact = false) {
@@ -1166,6 +1779,7 @@ function renderSponsorBlock(compact = false) {
 
 function renderGroupsSection() {
   const standings = calculateGroupStandings();
+  const qualifyingTeams = calculateCurrentGroupQualifiers(standings);
 
   return `
     <section>
@@ -1174,13 +1788,57 @@ function renderGroupsSection() {
         <span class="kicker">Tabela + jogos</span>
       </div>
       <div class="group-grid">
-        ${DATA.groups.map((group) => groupCard(group, standings[group.id] || [])).join("")}
+        ${DATA.groups.map((group) => groupCard(group, standings[group.id] || [], qualifyingTeams)).join("")}
       </div>
     </section>
   `;
 }
 
-function groupCard(group, rows) {
+function calculateCurrentGroupQualifiers(standings) {
+  const startedGroups = new Set();
+
+  DATA.matches.forEach((match) => {
+    const score = getPredictionScore(match);
+    if (
+      groupStageRounds.includes(match.round) &&
+      !isFutureScheduledMatch(match) &&
+      score.home !== null &&
+      score.away !== null
+    ) {
+      startedGroups.add(String(match.group || "").replace("Grupo ", ""));
+    }
+  });
+
+  const directQualifiers = new Set();
+  const thirdPlaced = [];
+
+  startedGroups.forEach((groupId) => {
+    const rows = standings[groupId] || [];
+    rows.slice(0, 2).forEach((row) => directQualifiers.add(row.team));
+
+    if (rows[2]) {
+      thirdPlaced.push({
+        ...rows[2],
+        groupId
+      });
+    }
+  });
+
+  thirdPlaced.sort((first, second) =>
+    second.pts - first.pts ||
+    second.sg - first.sg ||
+    second.gp - first.gp ||
+    first.team.localeCompare(second.team)
+  );
+
+  const bestThirdQualifiers = new Set(
+    thirdPlaced.slice(0, 8).map((row) => row.team)
+  );
+
+  return new Set([...directQualifiers, ...bestThirdQualifiers]);
+}
+
+function groupCard(group, rows, qualifyingTeams) {
   const matches = DATA.matches.filter((match) => match.group === group.name && groupStageRounds.includes(match.round));
 
   return `
@@ -1203,7 +1861,7 @@ function groupCard(group, rows) {
           </thead>
           <tbody>
             ${rows.map((row, index) => `
-              <tr>
+              <tr class="${qualifyingTeams.has(row.team) ? "group-qualified-row" : ""}">
                 <td>${index + 1}</td>
                 <td>${country(row.team)}</td>
                 <td class="center strong">${row.pts}</td>
@@ -1239,8 +1897,11 @@ function liveMatchDetails(match) {
   const events = liveMatchEvents(match);
   const eventBlock = events.length
     ? `
-      <div class="live-event-list">
-        ${events.map((event) => liveEventRow(event, match)).join('')}
+      <div class="live-match-events-block">
+        <div class="finished-events-title">Eventos</div>
+        <div class="live-event-list">
+          ${events.map((event) => liveEventRow(event, match)).join('')}
+        </div>
       </div>
     `
     : '';
@@ -1250,6 +1911,7 @@ function liveMatchDetails(match) {
 
 function liveMatchEvents(match) {
   const events = normalizeGoalList(match && match.events, "")
+    .filter((event) => eventBelongsToMatch(event, match))
     .map((event) => {
       const kind = String(event.kind || inferEventKind(event)).toLowerCase();
       const side = event.side === "away" || event.side === "home"
@@ -1285,6 +1947,28 @@ function liveMatchEvents(match) {
     seen.add(key);
     return true;
   });
+}
+
+function eventBelongsToMatch(event, match) {
+  if (!event || !match) return false;
+
+  const eventMatchId = String(event.matchId || "").trim();
+  if (eventMatchId && eventMatchId !== String(match.id || "")) {
+    return false;
+  }
+
+  const eventHome = normalizeEventTeamName(event.homeTeam);
+  const eventAway = normalizeEventTeamName(event.awayTeam);
+
+  if (eventHome && eventAway) {
+    const homeAliases = eventTeamAliases(match.team1);
+    const awayAliases = eventTeamAliases(match.team2);
+    const homeMatches = homeAliases.some((alias) => eventHome === alias || eventHome.includes(alias) || alias.includes(eventHome));
+    const awayMatches = awayAliases.some((alias) => eventAway === alias || eventAway.includes(alias) || alias.includes(eventAway));
+    if (!homeMatches || !awayMatches) return false;
+  }
+
+  return true;
 }
 
 function inferEventKind(event) {
@@ -1538,7 +2222,10 @@ function normalizeGoalList(value, team) {
       sequence: item.sequence || item.id || "",
       synthetic: Boolean(item.synthetic),
       score: item.score || {},
-      card: item.card || ""
+      card: item.card || "",
+      matchId: item.matchId || item.match || item.gameId || item.eventMatchId || "",
+      homeTeam: item.homeTeam || item.team1 || "",
+      awayTeam: item.awayTeam || item.team2 || ""
     };
   }).filter((item) => {
     return item && (
@@ -1814,10 +2501,11 @@ function renderPicksSection() {
                   ${DATA.players.map((player) => {
                     const pick = state.picks[player.id]?.[match.id];
                     return `
-                      <div class="player-pick">
+                      <div class="player-pick ${playerPickClass(pick, match)}">
                         <span class="player-pick-name">${player.name}</span>
                         <span class="player-pick-score">${formatPick(pick)}</span>
                         <span class="player-pick-date">${formatPickLastSaved(pick)}</span>
+                        ${playerPickResultBadge(pick, match)}
                       </div>
                     `;
                   }).join("")}
@@ -1965,6 +2653,55 @@ function setSaveButtonBusy(busy) {
   saveButton.textContent = busy ? "Salvando..." : "Salvar";
 }
 
+function validateRoundMatchesForSave(round, matches) {
+  const expectedCount = ROUND_MATCH_COUNTS[round];
+
+  if (!expectedCount) {
+    return "Rodada inválida.";
+  }
+
+  if (matches.length !== expectedCount) {
+    return `${displayRound(round)} está incompleta: esperados ${expectedCount} jogos, encontrados ${matches.length}.`;
+  }
+
+  const matchIds = new Set();
+
+  for (const match of matches) {
+    const matchId = String(match?.id || "").trim();
+
+    if (!matchId) {
+      return `${displayRound(round)} possui jogo sem ID.`;
+    }
+
+    if (matchIds.has(matchId)) {
+      return `O jogo ${matchId} está duplicado em ${displayRound(round)}.`;
+    }
+
+    if (Number.isNaN(makeDate(match).getTime())) {
+      return `O jogo ${matchId} está sem data ou horário válido.`;
+    }
+
+    matchIds.add(matchId);
+  }
+
+  if (round === "Rodada 8") {
+    const phases = matches.map((match) => String(match.group || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase());
+    const hasThirdPlace = phases.some((phase) =>
+      phase.includes("3o lugar") || phase.includes("3 lugar") || phase.includes("terceiro lugar")
+    );
+    const hasFinal = phases.some((phase) => phase === "final" || phase.includes("final da copa"));
+
+    if (!hasThirdPlace || !hasFinal) {
+      return "A última rodada deve conter a disputa de 3º lugar e a Final.";
+    }
+  }
+
+  return "";
+}
+
 function saveRoundPicks(round) {
   if (state.saveInFlight) {
     return;
@@ -1986,6 +2723,13 @@ function saveRoundPicks(round) {
   }
 
   const matches = DATA.matches.filter((match) => match.round === round);
+  const roundConfigurationError = validateRoundMatchesForSave(round, matches);
+
+  if (roundConfigurationError) {
+    alert(roundConfigurationError);
+    return;
+  }
+
   const newPicks = [];
 
   for (const match of matches) {
@@ -2050,6 +2794,29 @@ function saveRoundPicks(round) {
     state.saveInFlight = false;
     setSaveButtonBusy(false);
   });
+}
+
+function playerPickClass(pick, match) {
+  if (!isLiveMatch(match) && !isFinishedStatus(match)) return "";
+  const scored = scorePick(pick, match);
+  if (scored.exact) return "player-pick-exact";
+  if (scored.result) return "player-pick-result";
+  return "";
+}
+
+function playerPickResultBadge(pick, match) {
+  if (!isFinishedStatus(match)) return "";
+  const scored = scorePick(pick, match);
+
+  if (scored.exact) {
+    return `<span class="player-pick-hit-badge exact">Placar exato · +${DATA.settings.exactScorePoints}</span>`;
+  }
+
+  if (scored.result) {
+    return `<span class="player-pick-hit-badge result">Resultado · +${DATA.settings.resultPoints}</span>`;
+  }
+
+  return "";
 }
 
 function rankingTable(ranking) {
@@ -2171,30 +2938,69 @@ function buildRanking(excludedMatchId = "") {
 function getLastRankedMatch() {
   return DATA.matches
     .filter((match) => {
-      return !isFutureScheduledMatch(match) &&
-        match.score1 !== null &&
-        match.score1 !== undefined &&
-        match.score2 !== null &&
-        match.score2 !== undefined;
+      const score = getPredictionScore(match);
+      return !isFutureScheduledMatch(match) && score.home !== null && score.away !== null;
     })
     .sort((a, b) => makeDate(b) - makeDate(a))[0] || null;
 }
 
+function numericMatchValue(match, fields) {
+  for (const field of fields) {
+    const rawValue = match?.[field];
+
+    if (rawValue === null || rawValue === undefined || rawValue === "") {
+      continue;
+    }
+
+    const value = Number(rawValue);
+    if (Number.isFinite(value)) return value;
+  }
+
+  return null;
+}
+
+function getPredictionScore(match) {
+  const knockout = match && !groupStageRounds.includes(match.round);
+  const homeFields = knockout
+    ? [
+        "scoreAfterExtraTime1",
+        "scoreBeforePenalties1",
+        "regulationPlusExtraTime1",
+        "betScore1",
+        "score1"
+      ]
+    : ["score1"];
+  const awayFields = knockout
+    ? [
+        "scoreAfterExtraTime2",
+        "scoreBeforePenalties2",
+        "regulationPlusExtraTime2",
+        "betScore2",
+        "score2"
+      ]
+    : ["score2"];
+
+  return {
+    home: numericMatchValue(match, homeFields),
+    away: numericMatchValue(match, awayFields)
+  };
+}
+
 function scorePick(pick, match) {
+  const score = getPredictionScore(match);
+
   if (!pick ||
     isFutureScheduledMatch(match) ||
-    match.score1 === null ||
-    match.score1 === undefined ||
-    match.score2 === null ||
-    match.score2 === undefined) {
+    score.home === null ||
+    score.away === null) {
     return { points: 0, exact: false, result: false };
   }
 
-  if (pick.g1 === match.score1 && pick.g2 === match.score2) {
+  if (pick.g1 === score.home && pick.g2 === score.away) {
     return { points: 3, exact: true, result: true };
   }
 
-  if (outcome(pick.g1, pick.g2) === outcome(match.score1, match.score2)) {
+  if (outcome(pick.g1, pick.g2) === outcome(score.home, score.away)) {
     return { points: 1, exact: false, result: true };
   }
 
@@ -2225,38 +3031,45 @@ function calculateGroupStandings() {
   });
 
   DATA.matches
-    .filter((m) => groupStageRounds.includes(m.round) && !isFutureScheduledMatch(m) && m.score1 !== null && m.score2 !== null)
-    .forEach((m) => {
-      const groupId = String(m.group || "").replace("Grupo ", "");
+    .filter((match) => {
+      const score = getPredictionScore(match);
+      return groupStageRounds.includes(match.round) &&
+        !isFutureScheduledMatch(match) &&
+        score.home !== null &&
+        score.away !== null;
+    })
+    .forEach((match) => {
+      const score = getPredictionScore(match);
+      const groupId = String(match.group || "").replace("Grupo ", "");
       const table = standings[groupId];
       if (!table) return;
 
-      const a = table.find((r) => r.team === m.team1);
-      const b = table.find((r) => r.team === m.team2);
-      if (!a || !b) return;
+      const home = table.find((row) => row.team === match.team1);
+      const away = table.find((row) => row.team === match.team2);
+      if (!home || !away) return;
 
-      a.j++;
-      b.j++;
-      a.gp += m.score1;
-      a.gc += m.score2;
-      a.sg = a.gp - a.gc;
-      b.gp += m.score2;
-      b.gc += m.score1;
-      b.sg = b.gp - b.gc;
+      home.j++;
+      away.j++;
+      home.gp += score.home;
+      home.gc += score.away;
+      home.sg = home.gp - home.gc;
+      away.gp += score.away;
+      away.gc += score.home;
+      away.sg = away.gp - away.gc;
 
-      if (m.score1 > m.score2) {
-        a.v++;
-        b.d++;
-        a.pts += 3;
-      } else if (m.score1 < m.score2) {
-        b.v++;
-        a.d++;
-        b.pts += 3;
+      if (score.home > score.away) {
+        home.v++;
+        away.d++;
+        home.pts += 3;
+      } else if (score.home < score.away) {
+        away.v++;
+        home.d++;
+        away.pts += 3;
       } else {
-        a.e++;
-        b.e++;
-        a.pts++;
-        b.pts++;
+        home.e++;
+        away.e++;
+        home.pts++;
+        away.pts++;
       }
     });
 
@@ -2269,36 +3082,66 @@ function calculateGroupStandings() {
 
 function roundDeadline(round) {
   const first = DATA.matches
-    .filter((m) => m.round === round)
-    .sort((a, b) => makeDate(a) - makeDate(b))[0];
+    .filter((match) => match.round === round)
+    .sort((firstMatch, secondMatch) => makeDate(firstMatch) - makeDate(secondMatch))[0];
+
+  if (!first) {
+    return new Date(Number.NaN);
+  }
 
   const date = makeDate(first);
-  date.setHours(date.getHours() - DATA.settings.lockHoursBeforeRound);
+  const lockMinutes = Number(DATA.settings.lockMinutesBeforeRound ?? 15);
+  date.setMinutes(date.getMinutes() - lockMinutes);
   return date;
 }
 
 function isRoundLocked(round) {
-  return new Date() >= roundDeadline(round);
+  const deadline = roundDeadline(round);
+  return Number.isNaN(deadline.getTime()) || Date.now() >= deadline.getTime();
 }
 
 function isLiveMatch(match) {
+  if (!match || isFinishedStatus(match)) {
+    return false;
+  }
+
+  if (!hasExplicitLiveState(match)) {
+    return false;
+  }
+
+  const kickoff = makeDate(match).getTime();
+  const now = Date.now();
+
+  if (hasFreshLiveSource(match)) {
+    return !isInterruptedMatch(match) || !Number.isFinite(kickoff) || now >= kickoff;
+  }
+
+  return Number.isFinite(kickoff) &&
+    now >= kickoff - 5 * 60 * 1000 &&
+    now <= kickoff + ACTIVE_MATCH_GRACE_MS;
+}
+
+function hasExplicitLiveState(match) {
   const status = String(match && match.status || '').toLowerCase();
   const sourceStatus = String(match && match.sourceStatus || '').toLowerCase();
   const elapsed = String(match && match.elapsed || '').toLowerCase();
-
-  if (isFinishedStatus(match)) {
-    return false;
-  }
 
   if (
     status.includes('vivo') ||
     status.includes('live') ||
     status.includes('andamento') ||
+    status.includes('intervalo') ||
+    status.includes('interrompido') ||
     sourceStatus.includes('in_play') ||
     sourceStatus.includes('in play') ||
     sourceStatus.includes('paused') ||
+    sourceStatus.includes('halftime') ||
+    sourceStatus.includes('half time') ||
     sourceStatus.includes('extra_time') ||
-    sourceStatus.includes('penalty')
+    sourceStatus.includes('penalty') ||
+    sourceStatus.includes('suspended') ||
+    sourceStatus.includes('delayed') ||
+    sourceStatus.includes('weather')
   ) {
     return true;
   }
@@ -2307,10 +3150,38 @@ function isLiveMatch(match) {
     elapsed.replace(/['’]/g, '')
   ) || [
     'intervalo',
+    'halftime',
+    'half time',
+    'ht',
+    'break',
     'prorrogação',
     'penaltis',
-    'pênaltis'
+    'pênaltis',
+    'interrompido',
+    'suspenso',
+    'delayed'
   ].includes(elapsed);
+}
+
+function hasFreshLiveSource(match) {
+  const updatedAt = new Date(match && match.sourceUpdatedAt || '').getTime();
+
+  return Number.isFinite(updatedAt) &&
+    Date.now() - updatedAt >= 0 &&
+    Date.now() - updatedAt <= LIVE_SOURCE_FRESH_MS;
+}
+
+function isInterruptedMatch(match) {
+  const text = [
+    match && match.status,
+    match && match.sourceStatus,
+    match && match.elapsed
+  ].join(' ').toLowerCase();
+
+  return text.includes('interrompido') ||
+    text.includes('suspended') ||
+    text.includes('delayed') ||
+    text.includes('weather');
 }
 
 function makeDate(match) {
@@ -2472,12 +3343,14 @@ function isFinishedStatus(match) {
     match && match.status,
     match && match.sourceStatus,
     match && match.elapsed
-  ].join(' ').toLowerCase();
+  ]
+    .join(" ")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  return text.includes('final') ||
-    text.includes('finished') ||
-    text.includes('encerrado') ||
-    text.includes('ft');
+  return /(?:^|\s)(?:ft|aet|final|finished|encerrado|finalizado|full time|after extra time)(?:$|\s)/.test(text);
 }
 
 function matchResultInline(match) {
