@@ -20,7 +20,9 @@ const state = {
   homePicksManual: false,
   loadedBackend: false,
   saveInFlight: false,
-  rankingRange: localStorage.getItem("bolao-ranking-range") || "last10"
+  rankingRange: localStorage.getItem("bolao-ranking-range") || "last10",
+  roundDeadlines: {},
+  serverTimeOffsetMs: 0
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -28,6 +30,7 @@ const app = $("#app");
 let liveRefreshTimer = null;
 let homeMatchTransitionTimer = null;
 let deadlineRefreshTimer = null;
+let roundDeadlineTransitionTimer = null;
 let baseRequestPromise = null;
 let liveRequestPromise = null;
 let deferredBackendRender = false;
@@ -180,14 +183,39 @@ function setActiveTab() {
   });
 }
 
+function competitionNow() {
+  return Date.now() + state.serverTimeOffsetMs;
+}
+
+function syncServerState(payload, requestStartedAt = Date.now()) {
+  const serverNow = new Date(payload?.serverNow || "").getTime();
+
+  if (Number.isFinite(serverNow)) {
+    const responseReceivedAt = Date.now();
+    const estimatedClientAtServerResponse = requestStartedAt +
+      (responseReceivedAt - requestStartedAt) / 2;
+    state.serverTimeOffsetMs = serverNow - estimatedClientAtServerResponse;
+  }
+
+  const lockMinutes = Number(payload?.lockMinutesBeforeRound);
+
+  if (Number.isFinite(lockMinutes) && lockMinutes >= 0) {
+    DATA.settings.lockMinutesBeforeRound = lockMinutes;
+  }
+
+  if (payload?.roundDeadlines && typeof payload.roundDeadlines === "object") {
+    state.roundDeadlines = { ...payload.roundDeadlines };
+  }
+}
+
 function scheduleInitialBackendLoad() {
   window.requestAnimationFrame(() => {
     window.setTimeout(async () => {
       window.scrollTo({ top: 0, left: 0, behavior: "instant" });
-      await loadBaseState().catch(() => null);
+      const basePayload = await loadBaseState().catch(() => null);
 
-      if (shouldUseLiveRefresh() || hasRecentFinishedMatch()) {
-        loadLiveState(true).catch(() => null);
+      if (!basePayload && (shouldUseLiveRefresh() || hasRecentFinishedMatch())) {
+        await loadLiveState(true).catch(() => null);
       }
 
       scheduleLiveRefresh();
@@ -200,7 +228,7 @@ function hasLiveMatches() {
 }
 
 function hasPotentiallyActiveMatch() {
-  const now = Date.now();
+  const now = competitionNow();
 
   return DATA.matches.some((match) => {
     if (!match || isFinishedStatus(match)) return false;
@@ -224,7 +252,7 @@ function hasRecentFinishedMatch() {
   }
 
   const finishedAt = makeDate(match).getTime() + ACTIVE_MATCH_GRACE_MS;
-  return Number.isFinite(finishedAt) && Date.now() - finishedAt <= RECENT_FINISHED_DETAILS_MS;
+  return Number.isFinite(finishedAt) && competitionNow() - finishedAt <= RECENT_FINISHED_DETAILS_MS;
 }
 
 
@@ -416,6 +444,7 @@ function loadBaseState() {
   }
 
   const requestPicksRevision = picksWriteRevision;
+  const requestStartedAt = Date.now();
 
   baseRequestPromise = jsonp(`${DATA.settings.apiUrl}?action=statefast`)
     .then((payload) => {
@@ -424,6 +453,7 @@ function loadBaseState() {
       }
 
       persistFocusedBetDraft();
+      syncServerState(payload, requestStartedAt);
 
       const visualSignature = backendVisualSignature(payload);
       const shouldRender = !state.loadedBackend || visualSignature !== lastBackendVisualSignature;
@@ -469,13 +499,18 @@ function loadLiveState(force = false) {
     return liveRequestPromise;
   }
 
+  const requestStartedAt = Date.now();
   liveRequestPromise = jsonp(`${DATA.settings.apiUrl}?action=live`)
     .then((payload) => {
       if (!payload || payload.ok === false) {
         throw new Error(payload?.error || "Falha ao atualizar o jogo ao vivo.");
       }
 
-      const signature = backendVisualSignature({ matches: payload.matches || [] });
+      syncServerState(payload, requestStartedAt);
+      const signature = backendVisualSignature({
+        matches: payload.matches || [],
+        roundDeadlines: payload.roundDeadlines || {}
+      });
 
       if (signature === lastLiveVisualSignature) {
         return payload;
@@ -552,6 +587,9 @@ function backendVisualSignature(payload) {
   }
 
   if (Array.isArray(payload.picks)) signature.picks = payload.picks;
+  if (payload.roundDeadlines && typeof payload.roundDeadlines === "object") {
+    signature.roundDeadlines = payload.roundDeadlines;
+  }
 
   return JSON.stringify(signature);
 }
@@ -592,17 +630,19 @@ function setupAutoRefresh() {
     }
 
     const baseIsStale = Date.now() - lastBaseLoadAt >= BASE_STATE_STALE_MS;
-    const baseRefresh = baseIsStale
-      ? loadBaseState().catch(() => null)
-      : Promise.resolve(null);
 
-    baseRefresh.finally(() => {
-      if (shouldUseLiveRefresh()) {
-        loadLiveState().catch(() => null);
-      } else {
-        scheduleLiveRefresh();
-      }
-    });
+    if (baseIsStale) {
+      loadBaseState()
+        .catch(() => null)
+        .finally(scheduleLiveRefresh);
+      return;
+    }
+
+    if (shouldUseLiveRefresh()) {
+      loadLiveState().catch(() => null);
+    } else {
+      scheduleLiveRefresh();
+    }
   });
 
   window.addEventListener("pagehide", persistFocusedBetDraft);
@@ -670,8 +710,6 @@ function submitBackend(payload) {
     playerId: payload.playerId,
     playerCode: payload.playerCode,
     round: payload.round,
-    deadline: roundDeadline(payload.round).toISOString(),
-    lockMinutesBeforeRound: Number(DATA.settings.lockMinutesBeforeRound ?? 15),
     picks: payload.picks.map((pick) => ({
       m: pick.matchId,
       a: pick.g1,
@@ -686,9 +724,16 @@ function submitBackend(payload) {
 function render() {
   setActiveTab();
 
-  if (deadlineRefreshTimer && state.view !== "inicio" && state.view !== "palpites") {
-    window.clearInterval(deadlineRefreshTimer);
-    deadlineRefreshTimer = null;
+  if (state.view !== "inicio" && state.view !== "palpites") {
+    if (deadlineRefreshTimer) {
+      window.clearInterval(deadlineRefreshTimer);
+      deadlineRefreshTimer = null;
+    }
+
+    if (roundDeadlineTransitionTimer) {
+      window.clearTimeout(roundDeadlineTransitionTimer);
+      roundDeadlineTransitionTimer = null;
+    }
   }
 
   if (state.view === "ranking") {
@@ -960,7 +1005,7 @@ function getCurrentRoundIndex() {
     if (liveIndex >= 0) return liveIndex;
   }
 
-  const now = Date.now();
+  const now = competitionNow();
   let latestStartedIndex = -1;
 
   schedule.forEach((item, index) => {
@@ -994,14 +1039,12 @@ function getCurrentRoundName() {
 }
 
 function getNextRoundInfo() {
-  const schedule = getRoundSchedule();
-  const currentIndex = getCurrentRoundIndex();
+  const now = competitionNow();
 
-  if (currentIndex < 0 || currentIndex >= schedule.length - 1) {
-    return null;
-  }
-
-  return schedule[currentIndex + 1];
+  return getRoundSchedule().find((item) => {
+    const deadline = roundDeadline(item.round).getTime();
+    return Number.isFinite(deadline) && deadline > now;
+  }) || null;
 }
 
 function renderNextRoundDeadlineSection() {
@@ -1031,7 +1074,7 @@ function renderNextRoundDeadlineSection() {
 }
 
 function formatDeadlineCountdown(deadline) {
-  const remaining = deadline.getTime() - Date.now();
+  const remaining = deadline.getTime() - competitionNow();
 
   if (!Number.isFinite(remaining) || remaining <= 0) {
     return "Prazo encerrado";
@@ -1062,6 +1105,30 @@ function updateDeadlineCountdowns() {
   });
 }
 
+function scheduleRoundDeadlineTransition() {
+  if (roundDeadlineTransitionTimer) {
+    window.clearTimeout(roundDeadlineTransitionTimer);
+    roundDeadlineTransitionTimer = null;
+  }
+
+  const nextDeadline = rounds
+    .map((round) => roundDeadline(round).getTime())
+    .filter((timestamp) => Number.isFinite(timestamp) && timestamp > competitionNow())
+    .sort((first, second) => first - second)[0];
+
+  if (!nextDeadline || (state.view !== "inicio" && state.view !== "palpites")) {
+    return;
+  }
+
+  const delay = Math.max(0, nextDeadline - competitionNow() + 100);
+
+  roundDeadlineTransitionTimer = window.setTimeout(() => {
+    roundDeadlineTransitionTimer = null;
+    persistFocusedBetDraft();
+    render();
+  }, Math.min(delay, 2147483647));
+}
+
 function scheduleDeadlineRefresh() {
   if (deadlineRefreshTimer) {
     window.clearInterval(deadlineRefreshTimer);
@@ -1069,11 +1136,12 @@ function scheduleDeadlineRefresh() {
   }
 
   updateDeadlineCountdowns();
+  scheduleRoundDeadlineTransition();
   deadlineRefreshTimer = window.setInterval(updateDeadlineCountdowns, 30000);
 }
 
 function getNextScheduledMatch() {
-  const now = Date.now();
+  const now = competitionNow();
 
   return DATA.matches
     .filter((match) => !isLiveMatch(match) && !isFinishedStatus(match) && makeDate(match).getTime() > now)
@@ -1081,7 +1149,7 @@ function getNextScheduledMatch() {
 }
 
 function getFeaturedPendingMatches() {
-  const now = Date.now();
+  const now = competitionNow();
   const candidates = DATA.matches
     .filter((match) => {
       if (!match || isLiveMatch(match) || isFinishedStatus(match)) return false;
@@ -1120,7 +1188,7 @@ function scheduleHomeMatchTransition() {
     return;
   }
 
-  const now = Date.now();
+  const now = competitionNow();
   const kickoffAt = makeDate(nextMatch).getTime();
   const featureAt = kickoffAt - UPCOMING_FEATURE_WINDOW_MS;
   const transitionAt = now < featureAt ? featureAt : kickoffAt;
@@ -1133,7 +1201,7 @@ function scheduleHomeMatchTransition() {
   homeMatchTransitionTimer = window.setTimeout(() => {
     homeMatchTransitionTimer = null;
 
-    if (Date.now() >= kickoffAt) {
+    if (competitionNow() >= kickoffAt) {
       loadLiveState().catch(() => null);
       scheduleLiveRefresh();
     } else if (state.view === "inicio") {
@@ -1322,7 +1390,7 @@ function getDisplayedLiveMatches() {
   }
 
   const liveKickoffs = new Set(liveMatches.map((match) => makeDate(match).getTime()));
-  const now = Date.now();
+  const now = competitionNow();
   const pairedPendingMatches = DATA.matches.filter((match) => {
     if (!match || isLiveMatch(match) || isFinishedStatus(match)) return false;
 
@@ -1364,7 +1432,7 @@ function renderLiveMatchPanel(match, totalMatches) {
       : totalMatches > 1
         ? `Jogo ${match.number} em andamento`
         : "Atualização ESPN"
-    : kickoff <= Date.now()
+    : kickoff <= competitionNow()
       ? "Aguardando atualização ESPN"
       : "Começa em até 30 minutos";
 
@@ -1476,46 +1544,6 @@ function getLastFinishedMatch() {
     .sort((a, b) => makeDate(b) - makeDate(a))[0] || null;
 }
 
-function renderLastFinishedMatch(match) {
-  const events = liveMatchEvents(match);
-
-  return `
-    <section class="card last-match-section">
-      <div class="title-row">
-        <h2>✅ Último jogo</h2>
-        <span class="finished-pill">Jogo encerrado</span>
-      </div>
-
-      <div class="last-match-card">
-        <div class="last-match-meta">
-          <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-          <span>${formatDate(match.date)} · ${match.time}</span>
-        </div>
-
-        <div class="last-match-line">
-          <div class="last-team">${country(match.team1)}</div>
-          <strong class="last-score">${matchResultInline(match)}</strong>
-          <div class="last-team last-team-right">${country(match.team2)}</div>
-        </div>
-
-        ${events.length ? `
-          <div class="finished-events-title">Eventos</div>
-          <div class="live-event-list finished-goals-aligned">
-            ${events.map((event) => liveEventRow(event, match)).join("")}
-          </div>
-        ` : ""}
-
-        ${liveMatchStatistics(match)}
-
-        <div class="last-match-footer">
-          <span>${escapeHtml(match.venue || "")}</span>
-          <span>${escapeHtml(match.source || 'ESPN')}</span>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
 function getUpcomingGamesLimit() {
   const currentRound = getCurrentRoundName();
 
@@ -1566,7 +1594,7 @@ function isGroupStageComplete(groupId) {
 
   return groupMatches.length > 0 && groupMatches.every((match) => {
     const score = getPredictionScore(match);
-    return isFinishedStatus(match) || (score.home !== null && score.away !== null && makeDate(match).getTime() < Date.now());
+    return isFinishedStatus(match) || (score.home !== null && score.away !== null && makeDate(match).getTime() < competitionNow());
   });
 }
 
@@ -2765,6 +2793,12 @@ function saveRoundPicks(round) {
     });
   }
 
+  if (isRoundLocked(round)) {
+    alert("Rodada fechada para palpites.");
+    render();
+    return;
+  }
+
   setDraftRoundPicks(state.selectedPlayer, round, newPicks);
   mergePicks(newPicks);
 
@@ -3081,6 +3115,12 @@ function calculateGroupStandings() {
 }
 
 function roundDeadline(round) {
+  const serverDeadline = new Date(state.roundDeadlines?.[round] || "");
+
+  if (Number.isFinite(serverDeadline.getTime())) {
+    return serverDeadline;
+  }
+
   const first = DATA.matches
     .filter((match) => match.round === round)
     .sort((firstMatch, secondMatch) => makeDate(firstMatch) - makeDate(secondMatch))[0];
@@ -3097,7 +3137,7 @@ function roundDeadline(round) {
 
 function isRoundLocked(round) {
   const deadline = roundDeadline(round);
-  return Number.isNaN(deadline.getTime()) || Date.now() >= deadline.getTime();
+  return Number.isNaN(deadline.getTime()) || competitionNow() >= deadline.getTime();
 }
 
 function isLiveMatch(match) {
@@ -3110,7 +3150,7 @@ function isLiveMatch(match) {
   }
 
   const kickoff = makeDate(match).getTime();
-  const now = Date.now();
+  const now = competitionNow();
 
   if (hasFreshLiveSource(match)) {
     return !isInterruptedMatch(match) || !Number.isFinite(kickoff) || now >= kickoff;
@@ -3166,9 +3206,9 @@ function hasExplicitLiveState(match) {
 function hasFreshLiveSource(match) {
   const updatedAt = new Date(match && match.sourceUpdatedAt || '').getTime();
 
-  return Number.isFinite(updatedAt) &&
-    Date.now() - updatedAt >= 0 &&
-    Date.now() - updatedAt <= LIVE_SOURCE_FRESH_MS;
+  const age = competitionNow() - updatedAt;
+
+  return Number.isFinite(updatedAt) && age >= 0 && age <= LIVE_SOURCE_FRESH_MS;
 }
 
 function isInterruptedMatch(match) {
@@ -3335,7 +3375,7 @@ function isFutureScheduledMatch(match) {
     match.score2 !== null &&
     match.score2 !== undefined;
 
-  return !hasScore && makeDate(match).getTime() > Date.now();
+  return !hasScore && makeDate(match).getTime() > competitionNow();
 }
 
 function isFinishedStatus(match) {
