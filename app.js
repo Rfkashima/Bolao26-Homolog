@@ -5,6 +5,7 @@ const LIVE_REFRESH_MS = 15000;
 const BASE_STATE_STALE_MS = 5 * 60 * 1000;
 const UPCOMING_FEATURE_WINDOW_MS = 30 * 60 * 1000;
 const ACTIVE_MATCH_GRACE_MS = 4 * 60 * 60 * 1000;
+const LIVE_SOURCE_FRESH_MS = 10 * 60 * 1000;
 const RECENT_FINISHED_DETAILS_MS = 8 * 60 * 60 * 1000;
 
 const state = {
@@ -1335,35 +1336,44 @@ function renderLiveSection() {
     return "";
   }
 
-  const hasActualLiveMatch = displayedMatches.some((match) => isLiveMatch(match));
-  const firstKickoff = makeDate(displayedMatches[0]).getTime();
-  const kicker = hasActualLiveMatch
-    ? displayedMatches.length > 1
-      ? `${displayedMatches.length} jogos em andamento`
-      : "Atualização ESPN"
-    : firstKickoff <= Date.now()
+  return `
+    <div class="live-match-panels ${displayedMatches.length > 1 ? "has-simultaneous-games" : ""}">
+      ${displayedMatches.map((match) => renderLiveMatchPanel(match, displayedMatches.length)).join("")}
+    </div>
+  `;
+}
+
+function renderLiveMatchPanel(match, totalMatches) {
+  const live = isLiveMatch(match);
+  const interrupted = isInterruptedMatch(match);
+  const kickoff = makeDate(match).getTime();
+  const kicker = live
+    ? interrupted
+      ? "Jogo interrompido"
+      : totalMatches > 1
+        ? `Jogo ${match.number} em andamento`
+        : "Atualização ESPN"
+    : kickoff <= Date.now()
       ? "Aguardando atualização ESPN"
       : "Começa em até 30 minutos";
 
   return `
-    <section class="card live-section ${hasActualLiveMatch ? "" : "upcoming-featured-section"}">
+    <section class="card live-section live-match-panel ${live ? "" : "upcoming-featured-section"}" data-match-id="${escapeHtml(match.id)}">
       <div class="title-row">
         <h2>🔴 Ao vivo</h2>
-        <span class="kicker">${kicker}</span>
+        <span class="kicker">${escapeHtml(kicker)}</span>
       </div>
 
-      <div class="games-list live-games-list ${displayedMatches.length > 1 ? "has-simultaneous-games" : ""}">
-        ${displayedMatches.map(liveGameCard).join("")}
-      </div>
+      ${liveGameCard(match, live)}
     </section>
   `;
 }
 
-function liveGameCard(match) {
+function liveGameCard(match, includePicks) {
   const live = isLiveMatch(match);
 
   return `
-    <div class="game-card live-game-card ${live ? "" : "upcoming-featured-card"}" data-match-id="${escapeHtml(match.id)}">
+    <div class="live-game-card ${live ? "" : "upcoming-featured-card"}" data-match-id="${escapeHtml(match.id)}">
       <div class="game-top">
         <span>${displayRound(match.round)} · Jogo ${match.number}</span>
         <span>${formatDate(match.date)} · ${match.time}</span>
@@ -1371,8 +1381,35 @@ function liveGameCard(match) {
 
       ${live ? liveMatchLine(match) : matchLine(match)}
       ${live ? liveMatchDetails(match) : ""}
+      ${includePicks ? renderLiveMatchPicks(match) : ""}
 
       <div class="muted live-venue">${escapeHtml(match.venue || "")}</div>
+    </div>
+  `;
+}
+
+function renderLiveMatchPicks(match) {
+  if (!isRoundLocked(match.round)) {
+    return `<div class="notice picks-locked-notice live-picks-locked">🔒 Os palpites serão exibidos após o fechamento da rodada.</div>`;
+  }
+
+  return `
+    <div class="live-match-picks-block">
+      <div class="live-match-picks-title">Palpites</div>
+      <div class="player-picks live-player-picks">
+        ${DATA.players.map((player) => {
+          const pick = state.picks[player.id]?.[match.id];
+
+          return `
+            <div class="player-pick ${playerPickClass(pick, match)}">
+              <span class="player-pick-name">${player.name}</span>
+              <span class="player-pick-score">${formatPick(pick)}</span>
+              <span class="player-pick-date">${formatPickLastSaved(pick)}</span>
+              ${playerPickResultBadge(pick, match)}
+            </div>
+          `;
+        }).join("")}
+      </div>
     </div>
   `;
 }
@@ -1849,8 +1886,11 @@ function liveMatchDetails(match) {
   const events = liveMatchEvents(match);
   const eventBlock = events.length
     ? `
-      <div class="live-event-list">
-        ${events.map((event) => liveEventRow(event, match)).join('')}
+      <div class="live-match-events-block">
+        <div class="finished-events-title">Eventos</div>
+        <div class="live-event-list">
+          ${events.map((event) => liveEventRow(event, match)).join('')}
+        </div>
       </div>
     `
     : '';
@@ -2994,18 +3034,37 @@ function isRoundLocked(round) {
 }
 
 function isLiveMatch(match) {
+  if (!match || isFinishedStatus(match)) {
+    return false;
+  }
+
+  if (!hasExplicitLiveState(match)) {
+    return false;
+  }
+
+  const kickoff = makeDate(match).getTime();
+  const now = Date.now();
+
+  if (hasFreshLiveSource(match)) {
+    return !isInterruptedMatch(match) || !Number.isFinite(kickoff) || now >= kickoff;
+  }
+
+  return Number.isFinite(kickoff) &&
+    now >= kickoff - 5 * 60 * 1000 &&
+    now <= kickoff + ACTIVE_MATCH_GRACE_MS;
+}
+
+function hasExplicitLiveState(match) {
   const status = String(match && match.status || '').toLowerCase();
   const sourceStatus = String(match && match.sourceStatus || '').toLowerCase();
   const elapsed = String(match && match.elapsed || '').toLowerCase();
-
-  if (isFinishedStatus(match)) {
-    return false;
-  }
 
   if (
     status.includes('vivo') ||
     status.includes('live') ||
     status.includes('andamento') ||
+    status.includes('intervalo') ||
+    status.includes('interrompido') ||
     sourceStatus.includes('in_play') ||
     sourceStatus.includes('in play') ||
     sourceStatus.includes('paused') ||
@@ -3013,9 +3072,9 @@ function isLiveMatch(match) {
     sourceStatus.includes('half time') ||
     sourceStatus.includes('extra_time') ||
     sourceStatus.includes('penalty') ||
-    status.includes('intervalo') ||
-    status.includes('halftime') ||
-    status.includes('half time')
+    sourceStatus.includes('suspended') ||
+    sourceStatus.includes('delayed') ||
+    sourceStatus.includes('weather')
   ) {
     return true;
   }
@@ -3030,8 +3089,32 @@ function isLiveMatch(match) {
     'break',
     'prorrogação',
     'penaltis',
-    'pênaltis'
+    'pênaltis',
+    'interrompido',
+    'suspenso',
+    'delayed'
   ].includes(elapsed);
+}
+
+function hasFreshLiveSource(match) {
+  const updatedAt = new Date(match && match.sourceUpdatedAt || '').getTime();
+
+  return Number.isFinite(updatedAt) &&
+    Date.now() - updatedAt >= 0 &&
+    Date.now() - updatedAt <= LIVE_SOURCE_FRESH_MS;
+}
+
+function isInterruptedMatch(match) {
+  const text = [
+    match && match.status,
+    match && match.sourceStatus,
+    match && match.elapsed
+  ].join(' ').toLowerCase();
+
+  return text.includes('interrompido') ||
+    text.includes('suspended') ||
+    text.includes('delayed') ||
+    text.includes('weather');
 }
 
 function makeDate(match) {

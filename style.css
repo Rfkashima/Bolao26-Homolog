@@ -2706,3 +2706,69 @@ iframe{
   color: #dfffe5;
   font-weight: 950;
 }
+
+/* Jogos simultâneos: cada partida ocupa um card independente. */
+.live-match-panels{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.live-match-panels.has-simultaneous-games{
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.live-match-panel{
+  min-width: 0;
+  overflow: hidden;
+}
+
+.live-match-panel .live-game-card{
+  min-width: 0;
+  overflow: hidden;
+}
+
+.live-match-panel .live-match-events-block,
+.live-match-panel .live-match-stats,
+.live-match-panel .live-match-picks-block{
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 10px;
+  border-top: 1px solid rgba(255,255,255,.08);
+  padding-top: 9px;
+}
+
+.live-match-panel .live-match-events-block .live-event-list{
+  margin-top: 5px;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.live-match-picks-title{
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 1000;
+  letter-spacing: .08em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.live-match-panel .live-player-picks{
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 7px;
+}
+
+.live-picks-locked{
+  margin: 10px 0 0;
+}
+
+@media (max-width: 720px){
+  .live-match-panels.has-simultaneous-games{
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .live-match-panel .live-player-picks{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
