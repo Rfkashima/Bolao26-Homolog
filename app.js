@@ -1151,11 +1151,7 @@ function scheduleHomeMatchTransition() {
 }
 
 function getHomeReferenceMatch() {
-  const liveMatch = DATA.matches
-    .filter((match) => isLiveMatch(match))
-    .sort((a, b) => makeDate(a) - makeDate(b))[0];
-
-  return liveMatch || getFeaturedPendingMatches()[0] || getLastFinishedMatch();
+  return getLastFinishedMatch();
 }
 
 function getChronologicalMatches() {
@@ -1167,8 +1163,12 @@ function getChronologicalMatches() {
     });
 }
 
+function getHomeFinishedMatches() {
+  return getChronologicalMatches().filter((match) => isFinishedStatus(match));
+}
+
 function getHomePicksMatch() {
-  const matches = getChronologicalMatches();
+  const matches = getHomeFinishedMatches();
 
   if (!matches.length) {
     return { match: null, matches, index: -1 };
@@ -1181,7 +1181,7 @@ function getHomePicksMatch() {
   }
 
   if (!match) {
-    match = getHomeReferenceMatch() || matches[0];
+    match = getHomeReferenceMatch() || matches[matches.length - 1];
     state.homePicksMatchId = match.id;
     state.homePicksManual = false;
   }
@@ -1201,8 +1201,6 @@ function renderHomeMatchPicksSection() {
     return "";
   }
 
-  const isLive = isLiveMatch(match);
-  const isUpcoming = !isLive && isFutureScheduledMatch(match);
   const roundClosed = isRoundLocked(match.round);
   const activeIndex = navigation.index;
   const total = navigation.matches.length;
@@ -1211,7 +1209,7 @@ function renderHomeMatchPicksSection() {
     <section class="card home-match-picks-section">
       <div class="title-row home-picks-title-row">
         <h2>🎯 Palpites</h2>
-        <span class="kicker">${isLive ? "Jogo ao vivo" : isUpcoming ? "Próximo jogo" : "Jogo finalizado"}</span>
+        <span class="kicker">Jogo finalizado</span>
       </div>
 
       <div class="home-picks-navigation" aria-label="Navegação entre os jogos">
