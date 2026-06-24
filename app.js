@@ -2,7 +2,7 @@ const DATA = window.BOLAO_DATA;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
 const BACKEND_TIMEOUT_MS = 15000;
-const LIVE_REFRESH_MS = 15000;
+const LIVE_REFRESH_MS = 10000;
 const BASE_STATE_STALE_MS = 5 * 60 * 1000;
 const UPCOMING_FEATURE_WINDOW_MS = 30 * 60 * 1000;
 const ACTIVE_MATCH_GRACE_MS = 4 * 60 * 60 * 1000;
@@ -172,15 +172,15 @@ function setActiveTab() {
 
 function scheduleInitialBackendLoad() {
   window.requestAnimationFrame(() => {
-    window.setTimeout(async () => {
+    window.setTimeout(() => {
       window.scrollTo({ top: 0, left: 0, behavior: "instant" });
-      await loadBaseState().catch(() => null);
 
+      const requests = [loadBaseState().catch(() => null)];
       if (shouldUseLiveRefresh() || hasRecentFinishedMatch()) {
-        loadLiveState(true).catch(() => null);
+        requests.push(loadLiveState(true).catch(() => null));
       }
 
-      scheduleLiveRefresh();
+      Promise.allSettled(requests).finally(scheduleLiveRefresh);
     }, 0);
   });
 }
