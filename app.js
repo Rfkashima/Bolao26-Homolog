@@ -8,59 +8,11 @@ const UPCOMING_FEATURE_WINDOW_MS = 30 * 60 * 1000;
 const ACTIVE_MATCH_GRACE_MS = 4 * 60 * 60 * 1000;
 const LIVE_SOURCE_FRESH_MS = 10 * 60 * 1000;
 const RECENT_FINISHED_DETAILS_MS = 8 * 60 * 60 * 1000;
+const HISTORY_SYNC_BATCH_SIZE = 8;
+const HISTORY_SYNC_MAX_CYCLES = 40;
+const HISTORY_SYNC_DELAY_MS = 1200;
+const HISTORY_REQUEST_TIMEOUT_MS = 30000;
 
-const VERIFIED_RESULTS_THROUGH_J050 = Object.freeze({
-  "J001": [2, 0],
-  "J002": [2, 1],
-  "J003": [1, 1],
-  "J004": [4, 1],
-  "J005": [1, 1],
-  "J006": [1, 1],
-  "J007": [0, 1],
-  "J008": [2, 0],
-  "J009": [7, 1],
-  "J010": [2, 2],
-  "J011": [1, 0],
-  "J012": [5, 1],
-  "J013": [0, 0],
-  "J014": [1, 1],
-  "J015": [1, 1],
-  "J016": [2, 2],
-  "J017": [3, 1],
-  "J018": [1, 4],
-  "J019": [3, 0],
-  "J020": [3, 1],
-  "J021": [1, 1],
-  "J022": [4, 2],
-  "J023": [1, 0],
-  "J024": [1, 3],
-  "J025": [1, 1],
-  "J026": [4, 1],
-  "J027": [6, 0],
-  "J028": [1, 0],
-  "J029": [2, 0],
-  "J030": [0, 1],
-  "J031": [3, 0],
-  "J032": [0, 1],
-  "J033": [5, 1],
-  "J034": [2, 1],
-  "J035": [0, 0],
-  "J036": [0, 4],
-  "J037": [4, 0],
-  "J038": [0, 0],
-  "J039": [2, 2],
-  "J040": [1, 3],
-  "J041": [2, 0],
-  "J042": [3, 0],
-  "J043": [3, 2],
-  "J044": [1, 2],
-  "J045": [5, 0],
-  "J046": [0, 0],
-  "J047": [0, 1],
-  "J048": [1, 0],
-  "J049": [2, 1],
-  "J050": [3, 1],
-});
 
 const state = {
   view: "inicio",
@@ -73,6 +25,11 @@ const state = {
   homePicksMatchId: "",
   homePicksManual: false,
   loadedBackend: false,
+  loadedLive: false,
+  resultSyncPending: 0,
+  detailSyncPending: 0,
+  roundDeadlines: {},
+  serverTimeOffsetMs: 0,
   saveInFlight: false,
   rankingRange: localStorage.getItem("bolao-ranking-range") || "last10"
 };
@@ -82,8 +39,16 @@ const app = $("#app");
 let liveRefreshTimer = null;
 let homeMatchTransitionTimer = null;
 let deadlineRefreshTimer = null;
+let deadlineLockTimer = null;
+let lastBetRoundLocked = null;
 let baseRequestPromise = null;
 let liveRequestPromise = null;
+let historySyncPromise = null;
+let historySyncTimer = null;
+let historySyncCycles = 0;
+let historySyncNoProgress = 0;
+let historySyncCursor = 0;
+let historySyncPassProgress = false;
 let deferredBackendRender = false;
 let lastBackendVisualSignature = "";
 let lastLiveVisualSignature = "";
@@ -91,6 +56,9 @@ let lastBaseLoadAt = 0;
 let picksWriteRevision = 0;
 const rounds = [...new Set(DATA.matches.map((m) => m.round))];
 const groupStageRounds = ["Rodada 1", "Rodada 2", "Rodada 3"];
+const detailRequests = new Map();
+const detailRetryAfter = new Map();
+const detailsLoadedMatchIds = new Set();
 
 const ROUND_LABELS = {
   "Rodada 1": "Rodada 1",
@@ -168,20 +136,7 @@ const FLAG_POSITIONS = {
 
 
 
-function applyVerifiedCompletedResults() {
-  Object.entries(VERIFIED_RESULTS_THROUGH_J050).forEach(([matchId, score]) => {
-    const match = DATA.matches.find((item) => item.id === matchId);
 
-    if (!match) return;
-
-    match.score1 = score[0];
-    match.score2 = score[1];
-    match.status = "FT";
-    match.sourceStatus = "STATUS_FULL_TIME";
-    match.elapsed = "FT";
-    match.resultVerified = true;
-  });
-}
 
 function init() {
   state.view = "inicio";
@@ -190,7 +145,6 @@ function init() {
   if (siteTitle) siteTitle.textContent = DATA.settings.title;
   bindHeaderSponsorLink();
   mergePicks(DATA.initialPicks || []);
-  applyVerifiedCompletedResults();
   loadDrafts();
   bindMainTabs();
   setupAutoRefresh();
@@ -242,15 +196,15 @@ function setActiveTab() {
 
 function scheduleInitialBackendLoad() {
   window.requestAnimationFrame(() => {
-    window.setTimeout(async () => {
+    window.setTimeout(() => {
       window.scrollTo({ top: 0, left: 0, behavior: "instant" });
-      await loadBaseState().catch(() => null);
 
-      if (shouldUseLiveRefresh() || hasRecentFinishedMatch()) {
-        loadLiveState(true).catch(() => null);
-      }
+      const liveRequest = loadLiveState(true).catch(() => null);
+      const baseRequest = loadBaseState().catch(() => null);
 
-      scheduleLiveRefresh();
+      Promise.allSettled([liveRequest, baseRequest]).finally(() => {
+        scheduleLiveRefresh();
+      });
     }, 0);
   });
 }
@@ -393,8 +347,60 @@ function normalizeRemoteMatch(remote) {
   return normalized;
 }
 
-function mergeMatches(list) {
-  if (!Array.isArray(list)) return;
+function matchHasScore(match) {
+  return match?.score1 !== null &&
+    match?.score1 !== undefined &&
+    match?.score1 !== "" &&
+    match?.score2 !== null &&
+    match?.score2 !== undefined &&
+    match?.score2 !== "";
+}
+
+function remoteFinishedStatus(match) {
+  const text = [match?.status, match?.sourceStatus, match?.elapsed]
+    .join(" ")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return /(?:^|\s)(?:ft|aet|final|finished|encerrado|finalizado|full time|after extra time)(?:$|\s)/.test(text);
+}
+
+function remoteTimestamp(match) {
+  const values = [match?.sourceUpdatedAt, match?.finalizedAt, match?.detailsSyncedAt];
+
+  for (const value of values) {
+    const timestamp = new Date(value || "").getTime();
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+
+  return 0;
+}
+
+function meaningfulDetailValues(value) {
+  if (Array.isArray(value)) {
+    return value.reduce((total, item) => total + meaningfulDetailValues(item), 0);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.values(value).reduce((total, item) => total + meaningfulDetailValues(item), 0);
+  }
+
+  return value !== null && value !== undefined && value !== "" ? 1 : 0;
+}
+
+function matchDetailsWeight(match) {
+  const events = Array.isArray(match?.events) ? match.events.length : 0;
+  const statistics = meaningfulDetailValues(match?.statistics);
+  return events * 10000 + statistics;
+}
+
+function mergeMatches(list, origin = "base") {
+  if (!Array.isArray(list)) return false;
+
+  const priority = { base: 1, history: 2, details: 2, live: 3 }[origin] || 1;
+  let changed = false;
 
   list.forEach((item) => {
     const remote = normalizeRemoteMatch(item);
@@ -404,44 +410,97 @@ function mergeMatches(list) {
 
     if (!match) return;
 
-    const sourceStatus = String(remote.sourceStatus || '').toLowerCase();
-    const status = String(remote.status || '').toLowerCase();
-    const elapsed = String(remote.elapsed || '').toLowerCase();
-    const notStarted = status.includes('pendente') ||
-      status.includes('scheduled') ||
-      status.includes('timed') ||
-      sourceStatus.includes('not_started') ||
-      sourceStatus.includes('not started') ||
-      sourceStatus.includes('scheduled') ||
-      sourceStatus.includes('timed') ||
-      elapsed === 'notstarted' ||
-      elapsed === 'not_started' ||
-      elapsed === 'scheduled' ||
-      elapsed === 'ns';
+    const before = JSON.stringify({
+      score1: match.score1,
+      score2: match.score2,
+      status: match.status,
+      elapsed: match.elapsed,
+      sourceStatus: match.sourceStatus,
+      sourceUpdatedAt: match.sourceUpdatedAt,
+      finalizedAt: match.finalizedAt,
+      detailsSyncedAt: match.detailsSyncedAt,
+      events: match.events,
+      statistics: match.statistics
+    });
+    const sourceStatus = String(remote.sourceStatus || "").toLowerCase();
+    const status = String(remote.status || "").toLowerCase();
+    const elapsed = String(remote.elapsed || "").toLowerCase();
+    const notStarted = status.includes("pendente") ||
+      status.includes("scheduled") ||
+      status.includes("timed") ||
+      sourceStatus.includes("not_started") ||
+      sourceStatus.includes("not started") ||
+      sourceStatus.includes("scheduled") ||
+      sourceStatus.includes("timed") ||
+      elapsed === "notstarted" ||
+      elapsed === "not_started" ||
+      elapsed === "scheduled" ||
+      elapsed === "ns";
+    const currentFinished = isFinishedStatus(match) && matchHasScore(match);
+    const incomingFinished = remoteFinishedStatus(remote) && matchHasScore(remote);
+    const currentPriority = Number(match._mergePriority || 0);
+    const currentTimestamp = remoteTimestamp(match);
+    const incomingTimestamp = remoteTimestamp(remote);
+    const protectsCurrent = (currentFinished && !incomingFinished) ||
+      (currentFinished && incomingFinished && currentPriority > priority && currentTimestamp > 0 && currentTimestamp >= incomingTimestamp) ||
+      (!currentFinished && !incomingFinished && currentPriority > priority && currentTimestamp >= incomingTimestamp);
 
-    match.score1 = notStarted || remote.score1 === null || remote.score1 === ''
-      ? null
-      : remote.score1 !== undefined
-        ? Number(remote.score1)
-        : match.score1;
-    match.score2 = notStarted || remote.score2 === null || remote.score2 === ''
-      ? null
-      : remote.score2 !== undefined
-        ? Number(remote.score2)
-        : match.score2;
+    if (!protectsCurrent) {
+      if (remote.score1 !== undefined) {
+        match.score1 = notStarted || remote.score1 === null || remote.score1 === ""
+          ? null
+          : Number(remote.score1);
+      }
 
-    if (remote.status !== undefined) match.status = remote.status;
-    if (remote.elapsed !== undefined) match.elapsed = notStarted ? '' : remote.elapsed;
+      if (remote.score2 !== undefined) {
+        match.score2 = notStarted || remote.score2 === null || remote.score2 === ""
+          ? null
+          : Number(remote.score2);
+      }
+
+      if (remote.status !== undefined) match.status = remote.status;
+      if (remote.elapsed !== undefined) match.elapsed = notStarted ? "" : remote.elapsed;
+      if (remote.source !== undefined) match.source = remote.source;
+      if (remote.sourceStatus !== undefined) match.sourceStatus = remote.sourceStatus;
+      if (remote.sourceUpdatedAt !== undefined) match.sourceUpdatedAt = remote.sourceUpdatedAt;
+      match._mergePriority = Math.max(currentPriority, priority);
+    }
+
     if (remote.homeScorers !== undefined) match.homeScorers = remote.homeScorers;
     if (remote.awayScorers !== undefined) match.awayScorers = remote.awayScorers;
-    if (remote.events !== undefined) match.events = remote.events;
     if (remote.injuryTime !== undefined) match.injuryTime = remote.injuryTime;
-    if (remote.source !== undefined) match.source = remote.source;
-    if (remote.sourceStatus !== undefined) match.sourceStatus = remote.sourceStatus;
-    if (remote.sourceUpdatedAt !== undefined) match.sourceUpdatedAt = remote.sourceUpdatedAt;
-    if (remote.statistics !== undefined) match.statistics = remote.statistics;
+    if (remote.espnId !== undefined && remote.espnId !== "") match.espnId = remote.espnId;
+    if (remote.finalizedAt !== undefined && remote.finalizedAt !== "") match.finalizedAt = remote.finalizedAt;
+    if (remote.detailsSyncedAt !== undefined && remote.detailsSyncedAt !== "") match.detailsSyncedAt = remote.detailsSyncedAt;
     if (remote.team1 !== undefined && remote.team1 !== "") match.team1 = remote.team1;
     if (remote.team2 !== undefined && remote.team2 !== "") match.team2 = remote.team2;
+
+    const hasEventsField = Object.prototype.hasOwnProperty.call(remote, "events");
+    const hasStatisticsField = Object.prototype.hasOwnProperty.call(remote, "statistics");
+    const incomingEvents = hasEventsField && Array.isArray(remote.events) ? remote.events : [];
+    const incomingStatistics = hasStatisticsField && remote.statistics && typeof remote.statistics === "object"
+      ? remote.statistics
+      : {};
+    const detailsConfirmed = Boolean(remote.detailsSyncedAt) ||
+      incomingEvents.length > 0 ||
+      matchDetailsWeight({ statistics: incomingStatistics }) > 0;
+
+    if (detailsConfirmed) {
+      detailsLoadedMatchIds.add(String(match.id));
+    }
+
+    if (hasEventsField) {
+      const currentEvents = Array.isArray(match.events) ? match.events : [];
+      if (incomingEvents.length >= currentEvents.length) {
+        match.events = incomingEvents;
+      }
+    }
+
+    if (hasStatisticsField) {
+      if (matchDetailsWeight({ statistics: incomingStatistics }) >= matchDetailsWeight({ statistics: match.statistics })) {
+        match.statistics = incomingStatistics;
+      }
+    }
 
     [
       "scoreAfterExtraTime1",
@@ -463,7 +522,23 @@ function mergeMatches(list) {
         match[field] = remote[field];
       }
     });
+
+    const after = JSON.stringify({
+      score1: match.score1,
+      score2: match.score2,
+      status: match.status,
+      elapsed: match.elapsed,
+      sourceStatus: match.sourceStatus,
+      sourceUpdatedAt: match.sourceUpdatedAt,
+      finalizedAt: match.finalizedAt,
+      detailsSyncedAt: match.detailsSyncedAt,
+      events: match.events,
+      statistics: match.statistics
+    });
+    if (before !== after) changed = true;
   });
+
+  return changed;
 }
 
 function backendActionUrl(action) {
@@ -479,6 +554,24 @@ function validateBackendEnvironment(payload) {
   }
 }
 
+function updateBackendTiming(payload, requestStartedAt = Date.now()) {
+  const serverTimestamp = new Date(payload?.serverNow || "").getTime();
+  const receivedAt = Date.now();
+
+  if (Number.isFinite(serverTimestamp)) {
+    const midpoint = (Number(requestStartedAt) + receivedAt) / 2;
+    state.serverTimeOffsetMs = serverTimestamp - midpoint;
+  }
+
+  if (payload?.roundDeadlines && typeof payload.roundDeadlines === "object") {
+    state.roundDeadlines = Object.assign({}, payload.roundDeadlines);
+  }
+}
+
+function currentServerTimeMs() {
+  return Date.now() + Number(state.serverTimeOffsetMs || 0);
+}
+
 function loadBaseState() {
   if (!DATA.settings.apiUrl) {
     return Promise.resolve(null);
@@ -489,6 +582,7 @@ function loadBaseState() {
   }
 
   const requestPicksRevision = picksWriteRevision;
+  const requestStartedAt = Date.now();
 
   baseRequestPromise = jsonp(backendActionUrl("statefast"))
     .then((payload) => {
@@ -497,6 +591,7 @@ function loadBaseState() {
       }
 
       validateBackendEnvironment(payload);
+      updateBackendTiming(payload, requestStartedAt);
       persistFocusedBetDraft();
 
       const visualSignature = backendVisualSignature(payload);
@@ -510,8 +605,19 @@ function loadBaseState() {
         mergePicks(payload.picks);
       }
 
-      mergeMatches(payload.matches || []);
-      applyVerifiedCompletedResults();
+      mergeMatches(payload.matches || [], "base");
+      const previousHistoryPending = state.resultSyncPending + state.detailSyncPending;
+      state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
+      state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
+      const currentHistoryPending = state.resultSyncPending + state.detailSyncPending;
+
+      if (currentHistoryPending === 0 || (previousHistoryPending === 0 && currentHistoryPending > 0)) {
+        historySyncCycles = 0;
+        historySyncNoProgress = 0;
+        historySyncCursor = 0;
+        historySyncPassProgress = false;
+      }
+
       state.loadedBackend = true;
       lastBaseLoadAt = Date.now();
       lastBackendVisualSignature = visualSignature;
@@ -525,6 +631,8 @@ function loadBaseState() {
         }
       }
 
+      scheduleHistoricalSync();
+      requestCurrentHomeMatchDetails();
       return payload;
     })
     .finally(() => {
@@ -544,6 +652,7 @@ function loadLiveState(force = false) {
     return liveRequestPromise;
   }
 
+  const requestStartedAt = Date.now();
   liveRequestPromise = jsonp(backendActionUrl("live"))
     .then((payload) => {
       if (!payload || payload.ok === false) {
@@ -551,6 +660,8 @@ function loadLiveState(force = false) {
       }
 
       validateBackendEnvironment(payload);
+      updateBackendTiming(payload, requestStartedAt);
+      state.loadedLive = true;
       const signature = backendVisualSignature({ matches: payload.matches || [] });
 
       if (signature === lastLiveVisualSignature) {
@@ -558,10 +669,10 @@ function loadLiveState(force = false) {
       }
 
       persistFocusedBetDraft();
-      mergeMatches(payload.matches || []);
-      applyVerifiedCompletedResults();
+      mergeMatches(payload.matches || [], "live");
       lastLiveVisualSignature = signature;
       refreshAfterLiveUpdate();
+      requestCurrentHomeMatchDetails();
       return payload;
     })
     .finally(() => {
@@ -570,6 +681,167 @@ function loadLiveState(force = false) {
     });
 
   return liveRequestPromise;
+}
+
+function scheduleHistoricalSync(delay = HISTORY_SYNC_DELAY_MS) {
+  if (historySyncTimer) {
+    window.clearTimeout(historySyncTimer);
+    historySyncTimer = null;
+  }
+
+  if (
+    !state.loadedBackend ||
+    document.hidden ||
+    historySyncPromise ||
+    historySyncCycles >= HISTORY_SYNC_MAX_CYCLES ||
+    historySyncNoProgress >= 1 ||
+    state.resultSyncPending + state.detailSyncPending <= 0
+  ) {
+    return;
+  }
+
+  historySyncTimer = window.setTimeout(() => {
+    historySyncTimer = null;
+    const run = () => loadHistoricalState().catch(() => null);
+
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(run, { timeout: 2000 });
+    } else {
+      run();
+    }
+  }, Math.max(0, delay));
+}
+
+function loadHistoricalState() {
+  if (historySyncPromise || !DATA.settings.apiUrl) {
+    return historySyncPromise || Promise.resolve(null);
+  }
+
+  const previousPending = state.resultSyncPending + state.detailSyncPending;
+  const requestStartedAt = Date.now();
+  const url = `${backendActionUrl("historySync")}&limit=${HISTORY_SYNC_BATCH_SIZE}&cursor=${encodeURIComponent(historySyncCursor)}`;
+  historySyncCycles += 1;
+
+  historySyncPromise = jsonp(url, HISTORY_REQUEST_TIMEOUT_MS)
+    .then((payload) => {
+      if (!payload || payload.ok === false) {
+        throw new Error(payload?.error || "Falha ao sincronizar o histórico.");
+      }
+
+      validateBackendEnvironment(payload);
+      updateBackendTiming(payload, requestStartedAt);
+      const changed = mergeMatches(payload.matches || [], "history");
+      state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
+      state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
+      const currentPending = state.resultSyncPending + state.detailSyncPending;
+
+      const madeProgress = currentPending < previousPending || (payload.matches || []).length > 0;
+      if (madeProgress) {
+        historySyncPassProgress = true;
+        historySyncNoProgress = 0;
+      }
+
+      historySyncCursor = Math.max(0, Number(payload.historyCursor || 0));
+
+      if (payload.historyScanComplete) {
+        if (!historySyncPassProgress && currentPending > 0) {
+          historySyncNoProgress = 1;
+        }
+
+        historySyncPassProgress = false;
+      }
+
+      if (changed) {
+        refreshAfterHistoricalUpdate();
+      } else if (state.view === "ranking" && currentPending !== previousPending) {
+        renderRanking();
+      }
+
+      return payload;
+    })
+    .finally(() => {
+      historySyncPromise = null;
+      scheduleHistoricalSync();
+    });
+
+  return historySyncPromise;
+}
+
+function refreshAfterHistoricalUpdate() {
+  if (state.view === "inicio") {
+    renderHome();
+    return;
+  }
+
+  if (state.view === "ranking") {
+    renderRanking();
+    return;
+  }
+
+  if (state.view === "oficial") {
+    renderOfficial();
+  }
+}
+
+function loadMatchDetails(matchId) {
+  const id = String(matchId || "");
+  const retryAt = Number(detailRetryAfter.get(id) || 0);
+
+  if (
+    !id ||
+    detailsLoadedMatchIds.has(id) ||
+    detailRequests.has(id) ||
+    retryAt > Date.now() ||
+    !DATA.settings.apiUrl
+  ) {
+    return detailRequests.get(id) || Promise.resolve(null);
+  }
+
+  const requestStartedAt = Date.now();
+  const request = jsonp(`${backendActionUrl("matchDetails")}&matchId=${encodeURIComponent(id)}`, HISTORY_REQUEST_TIMEOUT_MS)
+    .then((payload) => {
+      if (!payload || payload.ok === false) {
+        throw new Error(payload?.error || "Falha ao carregar os detalhes do jogo.");
+      }
+
+      validateBackendEnvironment(payload);
+      updateBackendTiming(payload, requestStartedAt);
+      if (payload.match) {
+        mergeMatches([payload.match], "details");
+      }
+
+      const detailsConfirmed = detailsLoadedMatchIds.has(id);
+      if (detailsConfirmed) {
+        detailRetryAfter.delete(id);
+      } else {
+        detailRetryAfter.set(id, Date.now() + 60000);
+      }
+
+      if (detailsConfirmed && state.view === "inicio" && getHomePicksMatch().match?.id === id) {
+        const slot = $("#home-picks-slot");
+        if (slot) {
+          slot.innerHTML = renderHomeMatchPicksSection();
+          bindHomeEvents();
+        }
+      }
+
+      return payload.match || null;
+    })
+    .finally(() => {
+      detailRequests.delete(id);
+    });
+
+  detailRequests.set(id, request);
+  return request;
+}
+
+function requestCurrentHomeMatchDetails() {
+  if (state.view !== "inicio" || !state.loadedBackend) return;
+  const match = getHomePicksMatch().match;
+
+  if (match && isFinishedStatus(match) && matchHasScore(match)) {
+    loadMatchDetails(match.id).catch(() => null);
+  }
 }
 
 function refreshAfterLiveUpdate() {
@@ -618,6 +890,10 @@ function backendVisualSignature(payload) {
         awayScorers: match.awayScorers || [],
         events: match.events || [],
         statistics: match.statistics || {},
+        sourceUpdatedAt: match.sourceUpdatedAt || "",
+        finalizedAt: match.finalizedAt || "",
+        detailsSyncedAt: match.detailsSyncedAt || "",
+        espnId: match.espnId || "",
         scoreAfterExtraTime1: match.scoreAfterExtraTime1 ?? null,
         scoreAfterExtraTime2: match.scoreAfterExtraTime2 ?? null,
         scoreBeforePenalties1: match.scoreBeforePenalties1 ?? null,
@@ -668,13 +944,19 @@ function setupAutoRefresh() {
       return;
     }
 
+    historySyncCycles = 0;
+    historySyncNoProgress = 0;
+    historySyncCursor = 0;
+    historySyncPassProgress = false;
+    scheduleHistoricalSync(0);
+
     const baseIsStale = Date.now() - lastBaseLoadAt >= BASE_STATE_STALE_MS;
     const baseRefresh = baseIsStale
       ? loadBaseState().catch(() => null)
       : Promise.resolve(null);
 
     baseRefresh.finally(() => {
-      if (shouldUseLiveRefresh()) {
+      if (shouldUseLiveRefresh() || hasRecentFinishedMatch()) {
         loadLiveState().catch(() => null);
       } else {
         scheduleLiveRefresh();
@@ -701,7 +983,7 @@ function scheduleLiveRefresh() {
   }, LIVE_REFRESH_MS);
 }
 
-function jsonp(url) {
+function jsonp(url, timeoutMs = BACKEND_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const callbackName = `bolaoCallback_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     const script = document.createElement("script");
@@ -723,7 +1005,7 @@ function jsonp(url) {
 
     const timeoutId = window.setTimeout(() => {
       finish(reject, new Error("Tempo limite excedido ao carregar dados."));
-    }, BACKEND_TIMEOUT_MS);
+    }, timeoutMs);
 
     window[callbackName] = (payload) => {
       finish(resolve, payload);
@@ -767,6 +1049,11 @@ function render() {
   if (deadlineRefreshTimer && state.view !== "inicio" && state.view !== "palpites") {
     window.clearInterval(deadlineRefreshTimer);
     deadlineRefreshTimer = null;
+  }
+
+  if (deadlineLockTimer && state.view !== "palpites") {
+    window.clearTimeout(deadlineLockTimer);
+    deadlineLockTimer = null;
   }
 
   if (state.view === "ranking") {
@@ -815,6 +1102,9 @@ function renderRanking() {
           <h2>🏆 Ranking dos players</h2>
           <span class="kicker">Classificação atual</span>
         </div>
+        ${state.loadedBackend && state.resultSyncPending > 0
+          ? `<div class="info-box">Atualizando ${state.resultSyncPending} resultado${state.resultSyncPending === 1 ? "" : "s"} finalizado${state.resultSyncPending === 1 ? "" : "s"} no histórico...</div>`
+          : ""}
         ${state.loadedBackend
           ? rankingTable(calculateRanking())
           : `<div class="info-box">Carregando classificação...</div>`}
@@ -873,12 +1163,9 @@ function getCompletedRankedMatches(range) {
   let completed = DATA.matches
     .filter((match) => {
       const score = getPredictionScore(match);
-      return score.home !== null && score.away !== null && !isFutureScheduledMatch(match);
+      return isFinishedStatus(match) && score.home !== null && score.away !== null;
     })
-    .sort((first, second) => {
-      return makeDate(first).getTime() - makeDate(second).getTime() ||
-        Number(first.number || 0) - Number(second.number || 0);
-    });
+    .sort(compareFinishedMatches);
 
   if (range === "groups") {
     completed = completed.filter((match) => groupStageRounds.includes(match.round));
@@ -1113,7 +1400,7 @@ function renderNextRoundDeadlineSection() {
 }
 
 function formatDeadlineCountdown(deadline) {
-  const remaining = deadline.getTime() - Date.now();
+  const remaining = deadline.getTime() - currentServerTimeMs();
 
   if (!Number.isFinite(remaining) || remaining <= 0) {
     return "Prazo encerrado";
@@ -1142,6 +1429,18 @@ function updateDeadlineCountdowns() {
     const timestamp = Number(element.dataset.deadlineTime);
     element.textContent = formatDeadlineCountdown(new Date(timestamp));
   });
+
+  if (state.view === "palpites") {
+    const locked = isRoundLocked(state.betRound);
+
+    if (lastBetRoundLocked === false && locked) {
+      persistFocusedBetDraft();
+      renderPicksArea();
+      return;
+    }
+
+    lastBetRoundLocked = locked;
+  }
 }
 
 function scheduleDeadlineRefresh() {
@@ -1150,8 +1449,32 @@ function scheduleDeadlineRefresh() {
     deadlineRefreshTimer = null;
   }
 
+  if (deadlineLockTimer) {
+    window.clearTimeout(deadlineLockTimer);
+    deadlineLockTimer = null;
+  }
+
   updateDeadlineCountdowns();
   deadlineRefreshTimer = window.setInterval(updateDeadlineCountdowns, 30000);
+
+  if (state.view !== "palpites") return;
+
+  const deadline = roundDeadline(state.betRound);
+  const delay = deadline.getTime() - currentServerTimeMs();
+
+  if (!Number.isFinite(delay) || delay <= 0) {
+    lastBetRoundLocked = true;
+    return;
+  }
+
+  deadlineLockTimer = window.setTimeout(() => {
+    deadlineLockTimer = null;
+    persistFocusedBetDraft();
+
+    if (state.view === "palpites") {
+      renderPicksArea();
+    }
+  }, Math.min(delay + 50, 2147483647));
 }
 
 function getNextScheduledMatch() {
@@ -1227,6 +1550,7 @@ function scheduleHomeMatchTransition() {
 }
 
 function getHomeReferenceMatch() {
+  if (!state.loadedBackend) return null;
   return getLastFinishedMatch() || getChronologicalMatches()[0] || null;
 }
 
@@ -1253,7 +1577,12 @@ function getHomePicksMatch() {
   }
 
   if (!match) {
-    match = getHomeReferenceMatch() || matches[0];
+    match = getHomeReferenceMatch();
+
+    if (!match) {
+      return { match: null, matches, index: -1 };
+    }
+
     state.homePicksMatchId = match.id;
     state.homePicksManual = false;
   }
@@ -1270,7 +1599,15 @@ function renderHomeMatchPicksSection() {
   const match = navigation.match;
 
   if (!match) {
-    return "";
+    return `
+      <section class="card home-match-picks-section">
+        <div class="title-row home-picks-title-row">
+          <h2>🎯 Palpites</h2>
+          <span class="kicker">Histórico</span>
+        </div>
+        <div class="info-box">Carregando o último jogo finalizado...</div>
+      </section>
+    `;
   }
 
   const isLive = isLiveMatch(match);
@@ -1385,6 +1722,7 @@ function bindHomeEvents() {
 
   previous?.addEventListener("click", () => selectByOffset(-1));
   next?.addEventListener("click", () => selectByOffset(1));
+  requestCurrentHomeMatchDetails();
 }
 
 function getDisplayedLiveMatches() {
@@ -1548,13 +1886,30 @@ function formatLiveStatus(match) {
   return elapsed;
 }
 
+function finishedMatchTimestamp(match) {
+  const kickoff = makeDate(match).getTime();
+  const earliest = kickoff - 10 * 60 * 1000;
+  const latest = kickoff + 8 * 60 * 60 * 1000;
+  const timestamps = [match?.finalizedAt, match?.sourceUpdatedAt]
+    .map((value) => new Date(value || "").getTime())
+    .filter((timestamp) => Number.isFinite(timestamp) && timestamp >= earliest && timestamp <= latest);
+
+  if (timestamps.length) {
+    return Math.max(...timestamps);
+  }
+
+  return Number.isFinite(kickoff) ? kickoff + ACTIVE_MATCH_GRACE_MS : 0;
+}
+
+function compareFinishedMatches(first, second) {
+  return finishedMatchTimestamp(first) - finishedMatchTimestamp(second) ||
+    Number(first.number || 0) - Number(second.number || 0);
+}
+
 function getLastFinishedMatch() {
   return DATA.matches
-    .filter((match) => isFinishedStatus(match))
-    .sort((first, second) => {
-      return makeDate(second).getTime() - makeDate(first).getTime() ||
-        Number(second.number || 0) - Number(first.number || 0);
-    })[0] || null;
+    .filter((match) => isFinishedStatus(match) && matchHasScore(match))
+    .sort((first, second) => compareFinishedMatches(second, first))[0] || null;
 }
 
 function renderLastFinishedMatch(match) {
@@ -1822,6 +2177,7 @@ function renderOfficial() {
 }
 
 function renderPicksArea() {
+  lastBetRoundLocked = isRoundLocked(state.betRound);
   app.innerHTML = `
     <div class="stack">
       ${renderNextRoundDeadlineSection()}
@@ -2944,6 +3300,10 @@ function buildRanking(excludedMatchId = "") {
     let results = 0;
 
     DATA.matches.forEach((match) => {
+      if (!isFinishedStatus(match) || !matchHasScore(match)) {
+        return;
+      }
+
       if (excludedMatchId && match.id === excludedMatchId) {
         return;
       }
@@ -2972,12 +3332,9 @@ function getLastRankedMatch() {
   return DATA.matches
     .filter((match) => {
       const score = getPredictionScore(match);
-      return !isFutureScheduledMatch(match) && score.home !== null && score.away !== null;
+      return isFinishedStatus(match) && score.home !== null && score.away !== null;
     })
-    .sort((first, second) => {
-      return makeDate(second).getTime() - makeDate(first).getTime() ||
-        Number(second.number || 0) - Number(first.number || 0);
-    })[0] || null;
+    .sort((first, second) => compareFinishedMatches(second, first))[0] || null;
 }
 
 function numericMatchValue(match, fields) {
@@ -3117,6 +3474,12 @@ function calculateGroupStandings() {
 }
 
 function roundDeadline(round) {
+  const authoritative = new Date(state.roundDeadlines?.[round] || "");
+
+  if (!Number.isNaN(authoritative.getTime())) {
+    return authoritative;
+  }
+
   const first = DATA.matches
     .filter((match) => match.round === round)
     .sort((firstMatch, secondMatch) => makeDate(firstMatch) - makeDate(secondMatch))[0];
@@ -3133,7 +3496,7 @@ function roundDeadline(round) {
 
 function isRoundLocked(round) {
   const deadline = roundDeadline(round);
-  return Number.isNaN(deadline.getTime()) || Date.now() >= deadline.getTime();
+  return Number.isNaN(deadline.getTime()) || currentServerTimeMs() >= deadline.getTime();
 }
 
 function isLiveMatch(match) {
