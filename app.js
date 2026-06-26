@@ -8,9 +8,6 @@ const UPCOMING_FEATURE_WINDOW_MS = 30 * 60 * 1000;
 const ACTIVE_MATCH_GRACE_MS = 4 * 60 * 60 * 1000;
 const LIVE_SOURCE_FRESH_MS = 10 * 60 * 1000;
 const RECENT_FINISHED_DETAILS_MS = 8 * 60 * 60 * 1000;
-const HISTORY_SYNC_BATCH_SIZE = 8;
-const HISTORY_SYNC_MAX_CYCLES = 40;
-const HISTORY_SYNC_DELAY_MS = 1200;
 const HISTORY_REQUEST_TIMEOUT_MS = 30000;
 
 
@@ -43,12 +40,6 @@ let deadlineLockTimer = null;
 let lastBetRoundLocked = null;
 let baseRequestPromise = null;
 let liveRequestPromise = null;
-let historySyncPromise = null;
-let historySyncTimer = null;
-let historySyncCycles = 0;
-let historySyncNoProgress = 0;
-let historySyncCursor = 0;
-let historySyncPassProgress = false;
 let deferredBackendRender = false;
 let lastBackendVisualSignature = "";
 let lastLiveVisualSignature = "";
@@ -481,7 +472,7 @@ function mergeMatches(list, origin = "base") {
     const incomingStatistics = hasStatisticsField && remote.statistics && typeof remote.statistics === "object"
       ? remote.statistics
       : {};
-    const detailsConfirmed = Boolean(remote.detailsSyncedAt);
+    const detailsConfirmed = Boolean(remote.detailsSyncedAt) && (hasEventsField || hasStatisticsField);
 
     if (detailsConfirmed) {
       detailsLoadedMatchIds.add(String(match.id));
@@ -604,17 +595,8 @@ function loadBaseState() {
       }
 
       mergeMatches(payload.matches || [], "base");
-      const previousHistoryPending = state.resultSyncPending + state.detailSyncPending;
       state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
       state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
-      const currentHistoryPending = state.resultSyncPending + state.detailSyncPending;
-
-      if (currentHistoryPending === 0 || (previousHistoryPending === 0 && currentHistoryPending > 0)) {
-        historySyncCycles = 0;
-        historySyncNoProgress = 0;
-        historySyncCursor = 0;
-        historySyncPassProgress = false;
-      }
 
       state.loadedBackend = true;
       lastBaseLoadAt = Date.now();
@@ -629,7 +611,6 @@ function loadBaseState() {
         }
       }
 
-      scheduleHistoricalSync();
       requestCurrentHomeMatchDetails();
       return payload;
     })
@@ -679,106 +660,6 @@ function loadLiveState(force = false) {
     });
 
   return liveRequestPromise;
-}
-
-function scheduleHistoricalSync(delay = HISTORY_SYNC_DELAY_MS) {
-  if (historySyncTimer) {
-    window.clearTimeout(historySyncTimer);
-    historySyncTimer = null;
-  }
-
-  if (
-    !state.loadedBackend ||
-    document.hidden ||
-    historySyncPromise ||
-    historySyncCycles >= HISTORY_SYNC_MAX_CYCLES ||
-    historySyncNoProgress >= 1 ||
-    state.resultSyncPending + state.detailSyncPending <= 0
-  ) {
-    return;
-  }
-
-  historySyncTimer = window.setTimeout(() => {
-    historySyncTimer = null;
-    const run = () => loadHistoricalState().catch(() => null);
-
-    if ("requestIdleCallback" in window) {
-      window.requestIdleCallback(run, { timeout: 2000 });
-    } else {
-      run();
-    }
-  }, Math.max(0, delay));
-}
-
-function loadHistoricalState() {
-  if (historySyncPromise || !DATA.settings.apiUrl) {
-    return historySyncPromise || Promise.resolve(null);
-  }
-
-  const previousPending = state.resultSyncPending + state.detailSyncPending;
-  const requestStartedAt = Date.now();
-  const url = `${backendActionUrl("historySync")}&limit=${HISTORY_SYNC_BATCH_SIZE}&cursor=${encodeURIComponent(historySyncCursor)}`;
-  historySyncCycles += 1;
-
-  historySyncPromise = jsonp(url, HISTORY_REQUEST_TIMEOUT_MS)
-    .then((payload) => {
-      if (!payload || payload.ok === false) {
-        throw new Error(payload?.error || "Falha ao sincronizar o histórico.");
-      }
-
-      validateBackendEnvironment(payload);
-      updateBackendTiming(payload, requestStartedAt);
-      const changed = mergeMatches(payload.matches || [], "history");
-      state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
-      state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
-      const currentPending = state.resultSyncPending + state.detailSyncPending;
-
-      const madeProgress = currentPending < previousPending || (payload.matches || []).length > 0;
-      if (madeProgress) {
-        historySyncPassProgress = true;
-        historySyncNoProgress = 0;
-      }
-
-      historySyncCursor = Math.max(0, Number(payload.historyCursor || 0));
-
-      if (payload.historyScanComplete) {
-        if (!historySyncPassProgress && currentPending > 0) {
-          historySyncNoProgress = 1;
-        }
-
-        historySyncPassProgress = false;
-      }
-
-      if (changed) {
-        refreshAfterHistoricalUpdate();
-      } else if (state.view === "ranking" && currentPending !== previousPending) {
-        renderRanking();
-      }
-
-      return payload;
-    })
-    .finally(() => {
-      historySyncPromise = null;
-      scheduleHistoricalSync();
-    });
-
-  return historySyncPromise;
-}
-
-function refreshAfterHistoricalUpdate() {
-  if (state.view === "inicio") {
-    renderHome();
-    return;
-  }
-
-  if (state.view === "ranking") {
-    renderRanking();
-    return;
-  }
-
-  if (state.view === "oficial") {
-    renderOfficial();
-  }
 }
 
 function loadMatchDetails(matchId) {
@@ -942,12 +823,6 @@ function setupAutoRefresh() {
       return;
     }
 
-    historySyncCycles = 0;
-    historySyncNoProgress = 0;
-    historySyncCursor = 0;
-    historySyncPassProgress = false;
-    scheduleHistoricalSync(0);
-
     const baseIsStale = Date.now() - lastBaseLoadAt >= BASE_STATE_STALE_MS;
     const baseRefresh = baseIsStale
       ? loadBaseState().catch(() => null)
@@ -1103,9 +978,7 @@ function renderRanking() {
         </div>
         ${!state.loadedBackend
           ? `<div class="info-box">Carregando classificação...</div>`
-          : state.resultSyncPending > 0
-            ? `<div class="info-box">Sincronizando os resultados finalizados antes de calcular o ranking...</div>`
-            : rankingTable(calculateRanking())}
+          : rankingTable(calculateRanking())}
       </section>
 
       <section class="card ranking-page-card">
@@ -1123,9 +996,7 @@ function renderRanking() {
 
         ${!state.loadedBackend
           ? `<div class="info-box ranking-chart-empty">Carregando histórico do ranking...</div>`
-          : state.resultSyncPending > 0
-            ? `<div class="info-box ranking-chart-empty">O gráfico será exibido após a sincronização de todos os placares finalizados.</div>`
-            : renderRankingEvolutionChart(state.rankingRange)}
+          : renderRankingEvolutionChart(state.rankingRange)}
       </section>
 
       ${renderSponsorBlock(true)}
@@ -1390,12 +1261,17 @@ function renderNextRoundDeadlineSection() {
     <section class="card next-round-deadline-card" data-deadline-round="${escapeHtml(nextRound.round)}">
       <div class="next-round-deadline-icon" aria-hidden="true">⏰</div>
       <div class="next-round-deadline-content">
-        <span class="next-round-deadline-label">Fechamento da próxima rodada</span>
+        <span class="next-round-deadline-label">Fechamento dos palpites</span>
         <strong class="next-round-deadline-round">${escapeHtml(displayRound(nextRound.round))}</strong>
         <div class="next-round-deadline-highlight">
-          <span class="next-round-deadline-date-label">Data e horário de fechamento</span>
-          <strong class="next-round-deadline-date">${formatDateTime(deadline)}</strong>
-          <span class="round-deadline-countdown" data-deadline-time="${deadline.getTime()}">${formatDeadlineCountdown(deadline)}</span>
+          <div class="next-round-deadline-countdown-block">
+            <span class="next-round-deadline-block-label">Tempo restante</span>
+            <strong class="round-deadline-countdown" data-deadline-time="${deadline.getTime()}">${formatDeadlineCountdown(deadline)}</strong>
+          </div>
+          <div class="next-round-deadline-date-block">
+            <span class="next-round-deadline-block-label">Data e horário limite</span>
+            <strong class="next-round-deadline-date">${formatDateTime(deadline)}</strong>
+          </div>
         </div>
       </div>
     </section>
@@ -3804,7 +3680,16 @@ function formatDate(value) {
 }
 
 function formatDateTime(date) {
-  return date.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+  const dateText = date.toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  });
+  const timeText = date.toLocaleTimeString("pt-BR", {
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+  return `${dateText} às ${timeText}`;
 }
 
 
