@@ -190,13 +190,28 @@ function scheduleInitialBackendLoad() {
     window.setTimeout(() => {
       window.scrollTo({ top: 0, left: 0, behavior: "instant" });
 
-      const liveRequest = loadLiveState(true).catch(() => null);
+      const liveRequest = hasRelevantLiveWindow()
+        ? loadLiveState(true).catch(() => null)
+        : Promise.resolve(null);
       const baseRequest = loadBaseState().catch(() => null);
 
       Promise.allSettled([liveRequest, baseRequest]).finally(() => {
         scheduleLiveRefresh();
       });
     }, 0);
+  });
+}
+
+function hasRelevantLiveWindow() {
+  const now = Date.now();
+
+  return DATA.matches.some((match) => {
+    if (!match || isFinishedStatus(match)) return false;
+
+    const kickoff = makeDate(match).getTime();
+    return Number.isFinite(kickoff) &&
+      now >= kickoff - UPCOMING_FEATURE_WINDOW_MS &&
+      now <= kickoff + ACTIVE_MATCH_GRACE_MS;
   });
 }
 

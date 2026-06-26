@@ -3066,3 +3066,19 @@ iframe{
     font-size: 18px !important;
   }
 }
+
+/* Mantém o cabeçalho completo, inclusive a faixa de patrocínio da arte. */
+.hero{
+  min-height: 0 !important;
+  aspect-ratio: 3 / 1;
+  background-size: cover !important;
+  background-position: center !important;
+}
+
+/* A logo já possui transparência; não desenhar uma caixa branca atrás dela. */
+.sponsor-logo,
+.sponsor-card.compact .sponsor-logo{
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+}
