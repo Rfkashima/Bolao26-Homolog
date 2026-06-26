@@ -2126,7 +2126,7 @@ function renderSponsorBlock(compact = false) {
       aria-label="Abrir site da IA Pro Contato"
     >
       <div class="sponsor-wrap">
-        <div class="sponsor-logo"><img src="logo-ia-pro-contato.webp?v=20260626-logo-v6" alt="IA Pro Contato" width="768" height="256" loading="lazy" decoding="async"></div>
+        <div class="sponsor-logo"><img src="logo-ia-pro-contato.webp?v=20260626-logo-v7" alt="IA Pro Contato" width="768" height="256" loading="lazy" decoding="async"></div>
         <div class="sponsor-text">
           <div class="sponsor-label">Patrocínio</div>
           <div class="sponsor-name">IA Pro Contato</div>
