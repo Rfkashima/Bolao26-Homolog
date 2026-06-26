@@ -481,9 +481,7 @@ function mergeMatches(list, origin = "base") {
     const incomingStatistics = hasStatisticsField && remote.statistics && typeof remote.statistics === "object"
       ? remote.statistics
       : {};
-    const detailsConfirmed = Boolean(remote.detailsSyncedAt) ||
-      incomingEvents.length > 0 ||
-      matchDetailsWeight({ statistics: incomingStatistics }) > 0;
+    const detailsConfirmed = Boolean(remote.detailsSyncedAt);
 
     if (detailsConfirmed) {
       detailsLoadedMatchIds.add(String(match.id));
@@ -1081,6 +1079,7 @@ function renderHome() {
       ${renderNextRoundDeadlineSection()}
       <div id="home-picks-slot">${renderHomeMatchPicksSection()}</div>
       ${renderUpcomingGamesSection()}
+      ${renderSponsorBlock(true)}
     </div>
   `;
 
@@ -1102,12 +1101,11 @@ function renderRanking() {
           <h2>🏆 Ranking dos players</h2>
           <span class="kicker">Classificação atual</span>
         </div>
-        ${state.loadedBackend && state.resultSyncPending > 0
-          ? `<div class="info-box">Atualizando ${state.resultSyncPending} resultado${state.resultSyncPending === 1 ? "" : "s"} finalizado${state.resultSyncPending === 1 ? "" : "s"} no histórico...</div>`
-          : ""}
-        ${state.loadedBackend
-          ? rankingTable(calculateRanking())
-          : `<div class="info-box">Carregando classificação...</div>`}
+        ${!state.loadedBackend
+          ? `<div class="info-box">Carregando classificação...</div>`
+          : state.resultSyncPending > 0
+            ? `<div class="info-box">Sincronizando os resultados finalizados antes de calcular o ranking...</div>`
+            : rankingTable(calculateRanking())}
       </section>
 
       <section class="card ranking-page-card">
@@ -1123,9 +1121,11 @@ function renderRanking() {
           ${rankingFilterButton("knockout", "Apenas Mata-mata")}
         </div>
 
-        ${state.loadedBackend
-          ? renderRankingEvolutionChart(state.rankingRange)
-          : `<div class="info-box ranking-chart-empty">Carregando histórico do ranking...</div>`}
+        ${!state.loadedBackend
+          ? `<div class="info-box ranking-chart-empty">Carregando histórico do ranking...</div>`
+          : state.resultSyncPending > 0
+            ? `<div class="info-box ranking-chart-empty">O gráfico será exibido após a sincronização de todos os placares finalizados.</div>`
+            : renderRankingEvolutionChart(state.rankingRange)}
       </section>
 
       ${renderSponsorBlock(true)}
@@ -1391,9 +1391,12 @@ function renderNextRoundDeadlineSection() {
       <div class="next-round-deadline-icon" aria-hidden="true">⏰</div>
       <div class="next-round-deadline-content">
         <span class="next-round-deadline-label">Fechamento da próxima rodada</span>
-        <strong>${escapeHtml(displayRound(nextRound.round))}</strong>
-        <span class="next-round-deadline-date">${formatDateTime(deadline)}</span>
-        <span class="round-deadline-countdown" data-deadline-time="${deadline.getTime()}">${formatDeadlineCountdown(deadline)}</span>
+        <strong class="next-round-deadline-round">${escapeHtml(displayRound(nextRound.round))}</strong>
+        <div class="next-round-deadline-highlight">
+          <span class="next-round-deadline-date-label">Data e horário de fechamento</span>
+          <strong class="next-round-deadline-date">${formatDateTime(deadline)}</strong>
+          <span class="round-deadline-countdown" data-deadline-time="${deadline.getTime()}">${formatDeadlineCountdown(deadline)}</span>
+        </div>
       </div>
     </section>
   `;
@@ -1493,7 +1496,7 @@ function getFeaturedPendingMatches() {
 
       const kickoff = makeDate(match).getTime();
       return Number.isFinite(kickoff) &&
-        kickoff >= now - ACTIVE_MATCH_GRACE_MS &&
+        kickoff >= now &&
         kickoff <= now + UPCOMING_FEATURE_WINDOW_MS;
     })
     .sort((first, second) => {
@@ -1505,10 +1508,7 @@ function getFeaturedPendingMatches() {
     return [];
   }
 
-  const alreadyStarted = candidates.filter((match) => makeDate(match).getTime() <= now);
-  const anchorKickoff = alreadyStarted.length
-    ? Math.max(...alreadyStarted.map((match) => makeDate(match).getTime()))
-    : makeDate(candidates[0]).getTime();
+  const anchorKickoff = makeDate(candidates[0]).getTime();
 
   return candidates.filter((match) => makeDate(match).getTime() === anchorKickoff);
 }
@@ -1678,18 +1678,26 @@ function renderHomeMatchPicksSection() {
 
 function renderHomeFinishedMatchDetails(match) {
   if (!isFinishedStatus(match)) {
+    if (isPastMatchAwaitingResult(match)) {
+      return `<div class="info-box historical-result-pending">Sincronizando o placar e os eventos deste jogo finalizado...</div>`;
+    }
+
     return "";
   }
 
   const events = liveMatchEvents(match);
   const statistics = liveMatchStatistics(match);
+  const detailsPending = !match.detailsSyncedAt;
 
-  if (!events.length && !statistics) {
+  if (!events.length && !statistics && !detailsPending) {
     return "";
   }
 
   return `
     <div class="home-finished-match-details">
+      ${detailsPending
+        ? `<div class="info-box historical-result-pending">Sincronizando os eventos e as estatísticas deste jogo finalizado...</div>`
+        : ""}
       ${events.length ? `
         <div class="finished-events-title">Eventos</div>
         <div class="live-event-list finished-goals-aligned">
@@ -1853,7 +1861,7 @@ function liveMatchLine(match) {
   return `
     <div class="live-scoreboard">
       <div class="live-score-team live-score-home">
-        ${country(match.team1)}
+        ${country(matchTeamName(match, "home"))}
       </div>
 
       <strong class="live-score-number">${homeScore}</strong>
@@ -1866,7 +1874,7 @@ function liveMatchLine(match) {
       <strong class="live-score-number">${awayScore}</strong>
 
       <div class="live-score-team live-score-away">
-        ${country(match.team2)}
+        ${country(matchTeamName(match, "away"))}
       </div>
     </div>
   `;
@@ -1975,7 +1983,7 @@ function renderUpcomingGamesSection() {
     <section class="card upcoming-card">
       <div class="title-row">
         <h2>⏭️ Próximos jogos</h2>
-        <span class="kicker">${limit} próximos</span>
+        <span class="kicker">${upcoming.length} próximo${upcoming.length === 1 ? "" : "s"}</span>
       </div>
 
       ${upcoming.length
@@ -1984,6 +1992,33 @@ function renderUpcomingGamesSection() {
       }
     </section>
   `;
+}
+
+function resolvedTeamName(label) {
+  const value = String(label || "").trim();
+  const candidates = resolveTeamCandidates(value);
+  return candidates.length === 1 ? candidates[0] : value;
+}
+
+function matchTeamName(match, side) {
+  const key = side === "away" ? "team2" : "team1";
+  return resolvedTeamName(match?.[key]);
+}
+
+function matchTeamDisplay(match, side) {
+  const key = side === "away" ? "team2" : "team1";
+  const label = String(match?.[key] || "").trim();
+  const candidates = resolveTeamCandidates(label);
+
+  if (candidates.length === 1) {
+    return country(candidates[0]);
+  }
+
+  if (candidates.length > 1) {
+    return compactPossibleTeams(label);
+  }
+
+  return country(label);
 }
 
 function isKnownTeamName(name) {
@@ -2800,9 +2835,9 @@ function parseGoalText(text, team) {
 function matchLine(match) {
   return `
     <div class="match-line">
-      <div class="match-left">${country(match.team1)}</div>
+      <div class="match-left">${matchTeamDisplay(match, "home")}</div>
       <div class="match-score">${matchResultInline(match)}</div>
-      <div class="match-right">${country(match.team2)}</div>
+      <div class="match-right">${matchTeamDisplay(match, "away")}</div>
     </div>
   `;
 }
@@ -2870,7 +2905,7 @@ function betRow(match, playerId, locked) {
       </div>
 
       <div class="bet-line">
-        <span class="team">${country(match.team1)}</span>
+        <span class="team">${matchTeamDisplay(match, "home")}</span>
         <input
           type="number"
           min="0"
@@ -2880,7 +2915,7 @@ function betRow(match, playerId, locked) {
           autocomplete="off"
           data-match="${match.id}"
           data-side="g1"
-          aria-label="Palpite para ${escapeHtml(match.team1)}"
+          aria-label="Palpite para ${escapeHtml(matchTeamName(match, "home"))}"
           value="${pick.g1 ?? ""}"
           ${locked ? "disabled" : ""}
         >
@@ -2894,11 +2929,11 @@ function betRow(match, playerId, locked) {
           autocomplete="off"
           data-match="${match.id}"
           data-side="g2"
-          aria-label="Palpite para ${escapeHtml(match.team2)}"
+          aria-label="Palpite para ${escapeHtml(matchTeamName(match, "away"))}"
           value="${pick.g2 ?? ""}"
           ${locked ? "disabled" : ""}
         >
-        <span class="team">${country(match.team2)}</span>
+        <span class="team">${matchTeamDisplay(match, "away")}</span>
       </div>
     </div>
   `;
@@ -3711,22 +3746,9 @@ function isFutureScheduledMatch(match) {
     return false;
   }
 
-  const text = [
-    match.status,
-    match.sourceStatus,
-    match.elapsed
-  ].join(' ').toLowerCase();
-
-  if (
-    text.includes('pendente') ||
-    text.includes('notstarted') ||
-    text.includes('not_started') ||
-    text.includes('not started') ||
-    text.includes('scheduled') ||
-    text.includes('timed') ||
-    text.includes(' ns ')
-  ) {
-    return true;
+  const kickoff = makeDate(match).getTime();
+  if (!Number.isFinite(kickoff) || kickoff <= Date.now()) {
+    return false;
   }
 
   const hasScore = match.score1 !== null &&
@@ -3734,7 +3756,16 @@ function isFutureScheduledMatch(match) {
     match.score2 !== null &&
     match.score2 !== undefined;
 
-  return !hasScore && makeDate(match).getTime() > Date.now();
+  return !hasScore;
+}
+
+function isPastMatchAwaitingResult(match) {
+  if (!match || isLiveMatch(match) || isFinishedStatus(match) || matchHasScore(match)) {
+    return false;
+  }
+
+  const kickoff = makeDate(match).getTime();
+  return Number.isFinite(kickoff) && kickoff < Date.now();
 }
 
 function isFinishedStatus(match) {
