@@ -3085,3 +3085,247 @@ iframe{
   border: 0 !important;
   padding: 0 !important;
 }
+
+/* Navegação da aba Palpites por etapa */
+.picks-stage-switch{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:8px;
+  width:min(100%, 520px);
+  margin:0 auto;
+  padding:5px;
+  border:1px solid rgba(0,167,255,.38);
+  border-radius:16px;
+  background:rgba(3,8,18,.92);
+  box-shadow:var(--shadow);
+}
+
+.picks-stage-button{
+  min-height:44px;
+  border:1px solid transparent;
+  border-radius:12px;
+  background:transparent;
+  color:var(--muted);
+  font-weight:950;
+  cursor:pointer;
+}
+
+.picks-stage-button.active{
+  border-color:rgba(255,255,255,.58);
+  background:linear-gradient(135deg, var(--world-blue), var(--primary-2));
+  color:#fff;
+  box-shadow:0 8px 22px rgba(0,76,255,.28);
+}
+
+/* Chave afunilada do mata-mata */
+.knockout-funnel-card{
+  overflow:hidden;
+}
+
+.knockout-funnel-scroll{
+  width:100%;
+  overflow:visible;
+  padding:2px 1px 8px;
+}
+
+.knockout-funnel{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:12px;
+  width:100%;
+}
+
+.knockout-stage{
+  display:grid;
+  gap:8px;
+  min-width:0;
+  opacity:.86;
+}
+
+.knockout-stage-1{ width:100%; }
+.knockout-stage-2{ width:88%; }
+.knockout-stage-3{ width:76%; }
+.knockout-stage-4{ width:64%; }
+.knockout-stage-5{ width:52%; }
+
+.knockout-stage.selected{
+  opacity:1;
+}
+
+.knockout-stage-title{
+  width:100%;
+  min-height:42px;
+  border:1px solid rgba(0,167,255,.42);
+  border-radius:12px;
+  background:rgba(5,12,25,.96);
+  color:var(--text);
+  font-weight:1000;
+  cursor:pointer;
+}
+
+.knockout-stage.selected .knockout-stage-title{
+  border-color:rgba(255,255,255,.72);
+  background:linear-gradient(135deg, var(--world-blue), var(--primary-2));
+  box-shadow:0 8px 22px rgba(0,76,255,.24);
+}
+
+.knockout-stage-matches{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:8px;
+}
+
+.knockout-stage-5 .knockout-stage-matches{
+  grid-template-columns:1fr;
+}
+
+.knockout-funnel-match{
+  display:grid;
+  gap:6px;
+  width:100%;
+  min-width:0;
+  border:1px solid rgba(0,167,255,.32);
+  border-radius:12px;
+  padding:9px;
+  background:rgba(5,12,25,.94);
+  color:var(--text);
+  text-align:left;
+  cursor:pointer;
+}
+
+.knockout-funnel-match:hover,
+.knockout-funnel-match:focus-visible{
+  border-color:rgba(0,167,255,.78);
+  background:rgba(8,20,40,.98);
+}
+
+.knockout-funnel-meta{
+  color:var(--muted);
+  font-size:9px;
+  font-weight:850;
+  white-space:normal;
+}
+
+.knockout-funnel-teams{
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items:center;
+  gap:6px;
+  min-width:0;
+  font-size:11px;
+  font-weight:900;
+}
+
+.knockout-funnel-teams > span{
+  min-width:0;
+  overflow:hidden;
+}
+
+.knockout-funnel-teams > span:last-child{
+  text-align:right;
+}
+
+/* Modal de fechamento da rodada */
+body.modal-open{
+  overflow:hidden;
+}
+
+.closing-round-modal{
+  position:fixed;
+  inset:0;
+  z-index:2000;
+  display:grid;
+  place-items:center;
+  padding:18px;
+}
+
+.closing-round-modal-backdrop{
+  position:absolute;
+  inset:0;
+  background:rgba(0,3,10,.82);
+  backdrop-filter:blur(7px);
+}
+
+.closing-round-modal-card{
+  position:relative;
+  z-index:1;
+  width:min(100%, 440px);
+  border:1px solid rgba(255,255,255,.72);
+  border-top:4px solid var(--world-red);
+  border-radius:20px;
+  padding:22px 18px 18px;
+  background:linear-gradient(180deg, rgba(11,22,41,.99), rgba(3,8,18,.99));
+  box-shadow:0 26px 70px rgba(0,0,0,.58);
+  text-align:center;
+}
+
+.closing-round-modal-icon{
+  font-size:34px;
+  line-height:1;
+}
+
+.closing-round-modal-card h2{
+  margin:10px 0 8px;
+  font-size:22px;
+  letter-spacing:-.03em;
+}
+
+.closing-round-modal-countdown{
+  display:block;
+  margin-top:5px;
+  color:var(--amber);
+  font-size:29px;
+  line-height:1.05;
+  font-weight:1000;
+}
+
+.closing-round-modal-date{
+  margin-top:8px;
+  color:#fff;
+  font-size:17px;
+  font-weight:950;
+}
+
+.closing-round-modal-card p{
+  margin:14px 0 18px;
+  color:var(--muted);
+  line-height:1.45;
+  font-weight:800;
+}
+
+.closing-round-modal-ok{
+  width:100%;
+}
+
+@media (max-width: 720px){
+  .picks-stage-switch{
+    width:100%;
+  }
+
+  .knockout-stage-1{ width:100%; }
+  .knockout-stage-2{ width:96%; }
+  .knockout-stage-3{ width:92%; }
+  .knockout-stage-4{ width:88%; }
+  .knockout-stage-5{ width:84%; }
+
+  .knockout-stage-matches{
+    grid-template-columns:1fr;
+  }
+
+  .knockout-funnel-meta{
+    font-size:9px;
+  }
+
+  .knockout-funnel-teams{
+    font-size:10px;
+  }
+
+  .closing-round-modal-card{
+    padding:20px 15px 16px;
+  }
+
+  .closing-round-modal-countdown{
+    font-size:27px;
+  }
+}

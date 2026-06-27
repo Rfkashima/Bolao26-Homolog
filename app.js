@@ -1,6 +1,8 @@
 const DATA = window.BOLAO_DATA;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
+const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v2-${BACKEND_ENVIRONMENT || "default"}`;
+const BASE_STATE_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 15000;
 const LIVE_REFRESH_MS = 15000;
 const BASE_STATE_STALE_MS = 5 * 60 * 1000;
@@ -142,6 +144,7 @@ function init() {
   bindHeaderSponsorLink();
   mergePicks(DATA.initialPicks || []);
   loadDrafts();
+  restoreCachedBaseState();
   bindMainTabs();
   setupAutoRefresh();
   render();
@@ -263,6 +266,54 @@ function loadDrafts() {
 
 function saveDrafts() {
   localStorage.setItem(DRAFT_KEY, JSON.stringify(state.drafts || {}));
+}
+
+function restoreCachedBaseState() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(BASE_STATE_CACHE_KEY) || "null");
+    const cachedAt = Number(cached?.cachedAt || 0);
+    const payload = cached?.payload;
+
+    if (
+      !payload ||
+      payload.ok === false ||
+      String(payload.environment || "") !== BACKEND_ENVIRONMENT ||
+      !Number.isFinite(cachedAt) ||
+      Date.now() - cachedAt > BASE_STATE_CACHE_MAX_AGE_MS
+    ) {
+      return;
+    }
+
+    if (Array.isArray(payload.picks)) {
+      state.picks = {};
+      mergePicks(payload.picks);
+    }
+
+    mergeMatches(payload.matches || [], "base");
+    state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
+    state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
+    state.roundDeadlines = Object.assign({}, payload.roundDeadlines || {});
+
+    const cachedServerTime = new Date(payload.serverNow || "").getTime();
+    if (Number.isFinite(cachedServerTime)) {
+      state.serverTimeOffsetMs = cachedServerTime - cachedAt;
+    }
+
+    state.loadedBackend = true;
+  } catch (_) {
+    localStorage.removeItem(BASE_STATE_CACHE_KEY);
+  }
+}
+
+function cacheBaseState(payload) {
+  try {
+    localStorage.setItem(BASE_STATE_CACHE_KEY, JSON.stringify({
+      cachedAt: Date.now(),
+      payload
+    }));
+  } catch (_) {
+    // O cache local é apenas uma aceleração e não pode impedir o carregamento normal.
+  }
 }
 
 function getDraftPick(playerId, round, matchId) {
@@ -633,6 +684,7 @@ function loadBaseState() {
       state.loadedBackend = true;
       lastBaseLoadAt = Date.now();
       lastBackendVisualSignature = visualSignature;
+      cacheBaseState(payload);
 
       if (shouldRender) {
         if (isBetInputFocused()) {
@@ -1399,6 +1451,26 @@ function playerHasCompleteRoundPicks(playerId, round) {
   });
 }
 
+function ensureClosingRoundModalStyles() {
+  if (document.getElementById("closing-round-modal-critical-styles")) return;
+
+  const style = document.createElement("style");
+  style.id = "closing-round-modal-critical-styles";
+  style.textContent = `
+    body.modal-open{overflow:hidden!important}
+    .closing-round-modal{position:fixed!important;inset:0!important;z-index:99999!important;display:grid!important;place-items:center!important;padding:18px!important}
+    .closing-round-modal-backdrop{position:absolute!important;inset:0!important;background:rgba(0,3,10,.86)!important;backdrop-filter:blur(7px)!important}
+    .closing-round-modal-card{position:relative!important;z-index:1!important;width:min(100%,440px)!important;border:1px solid rgba(255,255,255,.72)!important;border-top:4px solid #ff1738!important;border-radius:20px!important;padding:22px 18px 18px!important;background:linear-gradient(180deg,rgba(11,22,41,.99),rgba(3,8,18,.99))!important;box-shadow:0 26px 70px rgba(0,0,0,.58)!important;text-align:center!important;color:#f8fbff!important}
+    .closing-round-modal-icon{font-size:34px!important;line-height:1!important}
+    .closing-round-modal-card h2{margin:10px 0 8px!important;font-size:22px!important}
+    .closing-round-modal-countdown{display:block!important;margin-top:5px!important;color:#ffcf3a!important;font-size:29px!important;line-height:1.05!important;font-weight:1000!important}
+    .closing-round-modal-date{margin-top:8px!important;color:#fff!important;font-size:17px!important;font-weight:950!important}
+    .closing-round-modal-card p{margin:14px 0 18px!important;color:#aeb8c7!important;line-height:1.45!important;font-weight:800!important}
+    .closing-round-modal-ok{width:100%!important;min-height:44px!important}
+  `;
+  document.head.appendChild(style);
+}
+
 function closeClosingRoundAlert() {
   document.querySelector(".closing-round-modal")?.remove();
   document.body.classList.remove("modal-open");
@@ -1427,6 +1499,7 @@ function showClosingRoundAlertIfNeeded() {
   }
 
   state.closingRoundAlertShown = true;
+  ensureClosingRoundModalStyles();
   const modal = document.createElement("div");
   modal.className = "closing-round-modal";
   modal.setAttribute("role", "dialog");
