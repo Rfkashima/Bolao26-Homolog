@@ -3722,3 +3722,79 @@ body.modal-open{
     font-size:9px;
   }
 }
+
+
+/* Correção do chaveamento no mobile e integração do envio de palpites */
+.stack,
+.container,
+.card,
+.knockout-bracket-card,
+.knockout-bracket-embedded{
+  min-width:0;
+  max-width:100%;
+}
+
+.knockout-bracket-embedded{
+  width:100%;
+  margin-top:14px;
+  padding-top:14px;
+  border-top:1px solid rgba(0,167,255,.34);
+  overflow:hidden;
+}
+
+.knockout-bracket-title-row{
+  margin-bottom:10px;
+}
+
+@media (max-width:899px){
+  .knockout-bracket-card,
+  .knockout-bracket-embedded{
+    overflow:hidden;
+  }
+
+  .knockout-bracket-scroll{
+    display:block;
+    width:100%;
+    max-width:100%;
+    min-width:0;
+    overflow-x:auto;
+    overflow-y:visible;
+    -webkit-overflow-scrolling:touch;
+    overscroll-behavior-x:auto;
+    touch-action:auto;
+    padding-bottom:8px;
+  }
+
+  .tournament-bracket{
+    width:820px;
+    min-width:820px;
+    max-width:none;
+  }
+}
+
+@media (max-width:520px){
+  .knockout-bracket-card,
+  .knockout-bracket-embedded{
+    width:100%;
+    max-width:100%;
+  }
+
+  .knockout-bracket-scroll{
+    margin:0;
+  }
+
+  .tournament-bracket{
+    width:760px;
+    min-width:760px;
+    grid-template-columns:minmax(0,1fr) 136px minmax(0,1fr);
+    gap:10px;
+  }
+
+  .bracket-side-labels{
+    column-gap:9px;
+  }
+
+  .bracket-grid{
+    column-gap:9px;
+  }
+}

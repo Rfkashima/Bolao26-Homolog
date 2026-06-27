@@ -2635,29 +2635,32 @@ function renderBracketSide(side, context, selectedRound) {
   `;
 }
 
-function renderKnockoutBracket(context = "official") {
+function renderKnockoutBracket(context = "official", embedded = false) {
   const selectedRound = context === "picks" ? state.betRound : "";
-
-  return `
-    <section class="card knockout-bracket-card">
-      <div class="title-row">
-        <h2>🏆 Chaveamento do mata-mata</h2>
-        <span class="kicker">Caminho até a final</span>
-      </div>
-      <div class="knockout-bracket-scroll">
-        <div class="tournament-bracket">
-          ${renderBracketSide("left", context, selectedRound)}
-          <div class="bracket-center-column">
-            <span class="bracket-center-label">Final</span>
-            ${renderBracketMatch(104, context, selectedRound)}
-            <span class="bracket-center-label bracket-third-label">3º lugar</span>
-            ${renderBracketMatch(103, context, selectedRound)}
-          </div>
-          ${renderBracketSide("right", context, selectedRound)}
+  const bracketContent = `
+    <div class="title-row knockout-bracket-title-row">
+      <h2>🏆 Chaveamento do mata-mata</h2>
+      <span class="kicker">Caminho até a final</span>
+    </div>
+    <div class="knockout-bracket-scroll">
+      <div class="tournament-bracket">
+        ${renderBracketSide("left", context, selectedRound)}
+        <div class="bracket-center-column">
+          <span class="bracket-center-label">Final</span>
+          ${renderBracketMatch(104, context, selectedRound)}
+          <span class="bracket-center-label bracket-third-label">3º lugar</span>
+          ${renderBracketMatch(103, context, selectedRound)}
         </div>
+        ${renderBracketSide("right", context, selectedRound)}
       </div>
-    </section>
+    </div>
   `;
+
+  if (embedded) {
+    return `<div class="knockout-bracket-embedded">${bracketContent}</div>`;
+  }
+
+  return `<section class="card knockout-bracket-card">${bracketContent}</section>`;
 }
 
 function renderPicksArea() {
@@ -2668,7 +2671,6 @@ function renderPicksArea() {
   app.innerHTML = `
     <div class="stack">
       ${renderCompetitionStageSwitch("picks", stage)}
-      ${stage === "knockout" ? renderKnockoutBracket("picks") : ""}
       ${renderNextRoundDeadlineSection()}
       ${renderBetSection()}
       ${renderPicksSection()}
@@ -3338,7 +3340,7 @@ function renderBetSection() {
       }
 
       ${getPicksStage() === "knockout"
-        ? ""
+        ? renderKnockoutBracket("picks", true)
         : `<div class="bet-list">
             ${matches.map((m) => betRow(m, playerId, locked)).join("")}
           </div>`
