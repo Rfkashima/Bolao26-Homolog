@@ -2,7 +2,7 @@ const DATA = window.BOLAO_DATA;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
 const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v2-${BACKEND_ENVIRONMENT || "default"}`;
-const BASE_STATE_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+const BASE_STATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
 const BASE_STATE_STALE_MS = 5 * 60 * 1000;
@@ -2484,14 +2484,65 @@ function bracketTeamDisplay(match, side) {
   return `<span class="bracket-team-pending">A definir</span>`;
 }
 
-function bracketMatchScore(match) {
-  const score = getPredictionScore(match);
+function formatBracketDate(value) {
+  const [, month, day] = String(value || "").split("-");
+  return day && month ? `${day}/${month}` : "";
+}
 
-  if (!isFinishedStatus(match) || score.home === null || score.away === null) {
+function bracketTeamValue(match, side) {
+  const score = getPredictionScore(match);
+  return side === "away" ? score.away : score.home;
+}
+
+function bracketPickInput(match, side, locked) {
+  const playerId = state.selectedPlayer;
+  const savedPick = state.picks[playerId]?.[match.id] || null;
+  const draftPick = getDraftPick(playerId, match.round, match.id);
+  const pick = draftPick || savedPick || {};
+  const dataSide = side === "away" ? "g2" : "g1";
+  const value = dataSide === "g2" ? pick.g2 : pick.g1;
+
+  return `
+    <input
+      class="bracket-pick-input"
+      type="number"
+      min="0"
+      max="99"
+      step="1"
+      inputmode="numeric"
+      autocomplete="off"
+      data-match="${match.id}"
+      data-side="${dataSide}"
+      aria-label="Palpite para ${escapeHtml(matchTeamName(match, side))}"
+      value="${value ?? ""}"
+      ${locked ? "disabled" : ""}
+    >
+  `;
+}
+
+function bracketTeamPrefix(match, side, context, selectedRound) {
+  if (context === "picks" && selectedRound === match.round) {
+    return bracketPickInput(match, side, isRoundLocked(match.round));
+  }
+
+  const value = bracketTeamValue(match, side);
+
+  if (!isFinishedStatus(match) || value === null) {
     return "";
   }
 
-  return `<strong class="bracket-match-score">${score.home} x ${score.away}</strong>`;
+  return `<strong class="bracket-team-score">${value}</strong>`;
+}
+
+function renderBracketTeamRow(match, side, context, selectedRound) {
+  return `
+    <div class="bracket-team-row">
+      <span class="bracket-team-entry">
+        ${bracketTeamPrefix(match, side, context, selectedRound)}
+        <span class="bracket-team-name">${bracketTeamDisplay(match, side)}</span>
+      </span>
+    </div>
+  `;
 }
 
 function renderBracketMatch(matchNumber, context, selectedRound) {
@@ -2500,7 +2551,7 @@ function renderBracketMatch(matchNumber, context, selectedRound) {
   if (!match) return "";
 
   const selected = selectedRound === match.round;
-  const interaction = context === "picks"
+  const interaction = context === "picks" && !selected
     ? `data-knockout-round="${match.round}" role="button" tabindex="0" aria-label="Selecionar ${escapeHtml(displayRound(match.round))}"`
     : "";
 
@@ -2508,15 +2559,10 @@ function renderBracketMatch(matchNumber, context, selectedRound) {
     <div class="bracket-match ${selected ? "selected-phase" : ""} ${isFinishedStatus(match) ? "finished" : ""}" ${interaction}>
       <div class="bracket-match-meta">
         <span>J${String(match.number).padStart(3, "0")}</span>
-        <span>${formatDate(match.date)} · ${match.time}</span>
+        <span>${formatBracketDate(match.date)} · ${match.time}</span>
       </div>
-      <div class="bracket-team-row">
-        <span>${bracketTeamDisplay(match, "home")}</span>
-        ${bracketMatchScore(match)}
-      </div>
-      <div class="bracket-team-row">
-        <span>${bracketTeamDisplay(match, "away")}</span>
-      </div>
+      ${renderBracketTeamRow(match, "home", context, selectedRound)}
+      ${renderBracketTeamRow(match, "away", context, selectedRound)}
     </div>
   `;
 }
@@ -3291,9 +3337,12 @@ function renderBetSection() {
         : `<div class="notice">⏰ ${displayRound(round)} fecha em ${formatDateTime(roundDeadline(round))}. As alterações ficam protegidas neste aparelho até o salvamento ser concluído.</div>`
       }
 
-      <div class="bet-list">
-        ${matches.map((m) => betRow(m, playerId, locked)).join("")}
-      </div>
+      ${getPicksStage() === "knockout"
+        ? ""
+        : `<div class="bet-list">
+            ${matches.map((m) => betRow(m, playerId, locked)).join("")}
+          </div>`
+      }
     </section>
   `;
 }
