@@ -36,7 +36,9 @@ const state = {
   picksStage: "",
   officialStage: "",
   closingRoundAlertShown: false,
-  baseLoadError: ""
+  baseLoadError: "",
+  betRoundManuallySelected: false,
+  picksRoundManuallySelected: false
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1431,6 +1433,8 @@ function updateDeadlineCountdowns() {
 
     if (lastBetRoundLocked === false && locked) {
       persistFocusedBetDraft();
+      state.betRoundManuallySelected = false;
+      state.picksRoundManuallySelected = false;
       renderPicksArea();
       return;
     }
@@ -1468,6 +1472,8 @@ function scheduleDeadlineRefresh() {
     persistFocusedBetDraft();
 
     if (state.view === "palpites") {
+      state.betRoundManuallySelected = false;
+      state.picksRoundManuallySelected = false;
       renderPicksArea();
     }
   }, Math.min(delay + 50, 2147483647));
@@ -2458,16 +2464,22 @@ function getPicksStageRounds() {
   return getPicksStage() === "knockout" ? knockoutRounds : groupStageRounds;
 }
 
+function getAutomaticPicksRound(allowedRounds) {
+  if (!Array.isArray(allowedRounds) || !allowedRounds.length) return "";
+  return allowedRounds.find((round) => !isRoundLocked(round)) || allowedRounds[allowedRounds.length - 1];
+}
+
 function normalizePicksRoundSelection() {
   const allowedRounds = getPicksStageRounds();
+  const automaticRound = getAutomaticPicksRound(allowedRounds);
 
-  if (!allowedRounds.includes(state.betRound)) {
-    state.betRound = allowedRounds[0];
+  if (!allowedRounds.includes(state.betRound) || !state.betRoundManuallySelected) {
+    state.betRound = automaticRound;
     localStorage.setItem("bolao-bet-round", state.betRound);
   }
 
-  if (!allowedRounds.includes(state.picksRound)) {
-    state.picksRound = allowedRounds[0];
+  if (!allowedRounds.includes(state.picksRound) || !state.picksRoundManuallySelected) {
+    state.picksRound = automaticRound;
     localStorage.setItem("bolao-picks-round", state.picksRound);
   }
 }
@@ -3475,6 +3487,7 @@ function bindEvents() {
     betRoundSelect.addEventListener("change", (event) => {
       persistFocusedBetDraft();
       state.betRound = event.target.value;
+      state.betRoundManuallySelected = true;
       localStorage.setItem("bolao-bet-round", state.betRound);
       render();
     });
@@ -3483,6 +3496,7 @@ function bindEvents() {
   if (picksRoundSelect) {
     picksRoundSelect.addEventListener("change", (event) => {
       state.picksRound = event.target.value;
+      state.picksRoundManuallySelected = true;
       localStorage.setItem("bolao-picks-round", state.picksRound);
       render();
     });
@@ -3492,6 +3506,8 @@ function bindEvents() {
     button.addEventListener("click", () => {
       persistFocusedBetDraft();
       state.picksStage = button.dataset.picksStage;
+      state.betRoundManuallySelected = false;
+      state.picksRoundManuallySelected = false;
       normalizePicksRoundSelection();
       renderPicksArea();
     });
@@ -3510,6 +3526,8 @@ function bindEvents() {
     persistFocusedBetDraft();
     state.betRound = round;
     state.picksRound = round;
+    state.betRoundManuallySelected = true;
+    state.picksRoundManuallySelected = true;
     localStorage.setItem("bolao-bet-round", round);
     localStorage.setItem("bolao-picks-round", round);
     renderPicksArea();
