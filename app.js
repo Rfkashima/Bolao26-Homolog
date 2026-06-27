@@ -30,7 +30,9 @@ const state = {
   roundDeadlines: {},
   serverTimeOffsetMs: 0,
   saveInFlight: false,
-  rankingRange: localStorage.getItem("bolao-ranking-range") || "last10"
+  rankingRange: localStorage.getItem("bolao-ranking-range") || "last10",
+  picksStage: "",
+  closingRoundAlertShown: false
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -49,6 +51,7 @@ let lastBaseLoadAt = 0;
 let picksWriteRevision = 0;
 const rounds = [...new Set(DATA.matches.map((m) => m.round))];
 const groupStageRounds = ["Rodada 1", "Rodada 2", "Rodada 3"];
+const knockoutRounds = ["Rodada 4", "Rodada 5", "Rodada 6", "Rodada 7", "Rodada 8"];
 const detailRequests = new Map();
 const detailRetryAfter = new Map();
 const detailsLoadedMatchIds = new Set();
@@ -57,7 +60,7 @@ const ROUND_LABELS = {
   "Rodada 1": "Rodada 1",
   "Rodada 2": "Rodada 2",
   "Rodada 3": "Rodada 3",
-  "Rodada 4": "Mata-mata · 32 avos",
+  "Rodada 4": "16 avos",
   "Rodada 5": "Oitavas de final",
   "Rodada 6": "Quartas de final",
   "Rodada 7": "Semifinais",
@@ -641,6 +644,7 @@ function loadBaseState() {
       }
 
       requestCurrentHomeMatchDetails();
+      window.setTimeout(showClosingRoundAlertIfNeeded, 0);
       return payload;
     })
     .finally(() => {
@@ -1382,6 +1386,71 @@ function scheduleDeadlineRefresh() {
   }, Math.min(delay + 50, 2147483647));
 }
 
+function playerHasCompleteRoundPicks(playerId, round) {
+  const matches = DATA.matches.filter((match) => match.round === round);
+
+  if (!playerId || !matches.length) {
+    return false;
+  }
+
+  return matches.every((match) => {
+    const pick = state.picks?.[playerId]?.[match.id];
+    return Number.isInteger(Number(pick?.g1)) && Number.isInteger(Number(pick?.g2));
+  });
+}
+
+function closeClosingRoundAlert() {
+  document.querySelector(".closing-round-modal")?.remove();
+  document.body.classList.remove("modal-open");
+}
+
+function showClosingRoundAlertIfNeeded() {
+  if (state.closingRoundAlertShown || !state.loadedBackend || !state.selectedPlayer) {
+    return;
+  }
+
+  const nextRound = getNextRoundInfo();
+
+  if (!nextRound) {
+    return;
+  }
+
+  const deadline = roundDeadline(nextRound.round);
+  const remaining = deadline.getTime() - currentCompetitionTimeMs();
+
+  if (!Number.isFinite(remaining) || remaining <= 0 || remaining >= 24 * 60 * 60 * 1000) {
+    return;
+  }
+
+  if (playerHasCompleteRoundPicks(state.selectedPlayer, nextRound.round)) {
+    return;
+  }
+
+  state.closingRoundAlertShown = true;
+  const modal = document.createElement("div");
+  modal.className = "closing-round-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "closing-round-modal-title");
+  modal.innerHTML = `
+    <div class="closing-round-modal-backdrop"></div>
+    <div class="closing-round-modal-card">
+      <div class="closing-round-modal-icon" aria-hidden="true">⏰</div>
+      <h2 id="closing-round-modal-title">Fechamento de ${escapeHtml(displayRound(nextRound.round))}</h2>
+      <strong class="closing-round-modal-countdown">${formatDeadlineCountdown(deadline)}</strong>
+      <div class="closing-round-modal-date">Fecha em ${formatDateTime(deadline)}</div>
+      <p>Você ainda não preencheu todos os palpites desta rodada. Preencha antes do fechamento.</p>
+      <button type="button" class="btn closing-round-modal-ok">OK</button>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+  document.body.classList.add("modal-open");
+  const okButton = modal.querySelector(".closing-round-modal-ok");
+  okButton?.addEventListener("click", closeClosingRoundAlert);
+  window.setTimeout(() => okButton?.focus(), 0);
+}
+
 function getNextScheduledMatch() {
   const now = currentCompetitionTimeMs();
 
@@ -2113,11 +2182,102 @@ function renderOfficial() {
   bindEvents();
 }
 
+function getDefaultPicksStage() {
+  return isRoundLocked("Rodada 3") ? "knockout" : "groups";
+}
+
+function getPicksStage() {
+  if (state.picksStage !== "groups" && state.picksStage !== "knockout") {
+    state.picksStage = getDefaultPicksStage();
+  }
+
+  return state.picksStage;
+}
+
+function getPicksStageRounds() {
+  return getPicksStage() === "knockout" ? knockoutRounds : groupStageRounds;
+}
+
+function normalizePicksRoundSelection() {
+  const allowedRounds = getPicksStageRounds();
+
+  if (!allowedRounds.includes(state.betRound)) {
+    state.betRound = allowedRounds[0];
+    localStorage.setItem("bolao-bet-round", state.betRound);
+  }
+
+  if (!allowedRounds.includes(state.picksRound)) {
+    state.picksRound = allowedRounds[0];
+    localStorage.setItem("bolao-picks-round", state.picksRound);
+  }
+}
+
+function renderPicksStageSwitch() {
+  const stage = getPicksStage();
+
+  return `
+    <section class="picks-stage-switch" role="group" aria-label="Fase dos palpites">
+      <button type="button" class="picks-stage-button ${stage === "groups" ? "active" : ""}" data-picks-stage="groups">Grupos</button>
+      <button type="button" class="picks-stage-button ${stage === "knockout" ? "active" : ""}" data-picks-stage="knockout">Mata-mata</button>
+    </section>
+  `;
+}
+
+function renderKnockoutFunnel() {
+  const stages = [
+    { round: "Rodada 4", title: "16 avos" },
+    { round: "Rodada 5", title: "Oitavas" },
+    { round: "Rodada 6", title: "Quartas" },
+    { round: "Rodada 7", title: "Semifinal" },
+    { round: "Rodada 8", title: "Final / 3º lugar" }
+  ];
+
+  return `
+    <section class="card knockout-funnel-card">
+      <div class="title-row">
+        <h2>🏆 Mata-mata</h2>
+        <span class="kicker">Selecione a fase</span>
+      </div>
+      <div class="knockout-funnel-scroll">
+        <div class="knockout-funnel">
+          ${stages.map((stage, stageIndex) => {
+            const stageMatches = DATA.matches.filter((match) => match.round === stage.round);
+            const selected = state.betRound === stage.round;
+
+            return `
+              <section class="knockout-stage knockout-stage-${stageIndex + 1} ${selected ? "selected" : ""}">
+                <button type="button" class="knockout-stage-title" data-knockout-round="${stage.round}" aria-pressed="${selected ? "true" : "false"}">${stage.title}</button>
+                <div class="knockout-stage-matches">
+                  ${stageMatches.map((match) => `
+                    <button type="button" class="knockout-funnel-match" data-knockout-round="${stage.round}">
+                      <span class="knockout-funnel-meta">J${String(match.number).padStart(3, "0")} · ${formatDate(match.date)} ${match.time}</span>
+                      <span class="knockout-funnel-teams">
+                        <span>${matchTeamDisplay(match, "home")}</span>
+                        <strong>x</strong>
+                        <span>${matchTeamDisplay(match, "away")}</span>
+                      </span>
+                    </button>
+                  `).join("")}
+                </div>
+              </section>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderPicksArea() {
+  normalizePicksRoundSelection();
   lastBetRoundLocked = isRoundLocked(state.betRound);
+  const knockout = getPicksStage() === "knockout";
+
   app.innerHTML = `
     <div class="stack">
+      ${renderPicksStageSwitch()}
       ${renderNextRoundDeadlineSection()}
+      ${knockout ? renderKnockoutFunnel() : ""}
       ${renderBetSection()}
       ${renderPicksSection()}
       ${renderSponsorBlock(true)}
@@ -2742,7 +2902,8 @@ function matchLine(match) {
 }
 
 function renderBetSection() {
-  const round = rounds.includes(state.betRound) ? state.betRound : rounds[0];
+  const allowedRounds = getPicksStageRounds();
+  const round = allowedRounds.includes(state.betRound) ? state.betRound : allowedRounds[0];
   const playerId = state.selectedPlayer;
   const locked = isRoundLocked(round);
   const saving = Boolean(state.saveInFlight);
@@ -2770,9 +2931,9 @@ function renderBetSection() {
         </div>
 
         <div class="field">
-          <label>Rodada</label>
+          <label>${getPicksStage() === "knockout" ? "Fase" : "Rodada"}</label>
           <select id="betRoundSelect">
-            ${rounds.map((r) => `<option value="${r}" ${r === round ? "selected" : ""}>${displayRound(r)}</option>`).join("")}
+            ${allowedRounds.map((r) => `<option value="${r}" ${r === round ? "selected" : ""}>${displayRound(r)}</option>`).join("")}
           </select>
         </div>
 
@@ -2839,7 +3000,8 @@ function betRow(match, playerId, locked) {
 }
 
 function renderPicksSection() {
-  const round = rounds.includes(state.picksRound) ? state.picksRound : rounds[0];
+  const allowedRounds = getPicksStageRounds();
+  const round = allowedRounds.includes(state.picksRound) ? state.picksRound : allowedRounds[0];
   const matches = DATA.matches.filter((match) => match.round === round);
   const roundClosed = isRoundLocked(round);
 
@@ -2854,7 +3016,7 @@ function renderPicksSection() {
         <div class="field">
           <label>Rodada/fase</label>
           <select id="picksRoundSelect">
-            ${rounds.map((item) => `<option value="${item}" ${item === round ? "selected" : ""}>${displayRound(item)}</option>`).join("")}
+            ${allowedRounds.map((item) => `<option value="${item}" ${item === round ? "selected" : ""}>${displayRound(item)}</option>`).join("")}
           </select>
         </div>
       </div>
@@ -2928,6 +3090,28 @@ function bindEvents() {
       render();
     });
   }
+
+  document.querySelectorAll("[data-picks-stage]").forEach((button) => {
+    button.addEventListener("click", () => {
+      persistFocusedBetDraft();
+      state.picksStage = button.dataset.picksStage;
+      normalizePicksRoundSelection();
+      renderPicksArea();
+    });
+  });
+
+  document.querySelectorAll("[data-knockout-round]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const round = button.dataset.knockoutRound;
+      if (!knockoutRounds.includes(round)) return;
+      persistFocusedBetDraft();
+      state.betRound = round;
+      state.picksRound = round;
+      localStorage.setItem("bolao-bet-round", round);
+      localStorage.setItem("bolao-picks-round", round);
+      renderPicksArea();
+    });
+  });
 
   const scoreInputs = [...document.querySelectorAll("input[data-match][data-side]")];
 
