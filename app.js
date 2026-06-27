@@ -3,7 +3,7 @@ const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
 const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v2-${BACKEND_ENVIRONMENT || "default"}`;
 const BASE_STATE_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
-const BACKEND_TIMEOUT_MS = 15000;
+const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
 const BASE_STATE_STALE_MS = 5 * 60 * 1000;
 const UPCOMING_FEATURE_WINDOW_MS = 30 * 60 * 1000;
@@ -34,7 +34,9 @@ const state = {
   saveInFlight: false,
   rankingRange: localStorage.getItem("bolao-ranking-range") || "last10",
   picksStage: "",
-  closingRoundAlertShown: false
+  officialStage: "",
+  closingRoundAlertShown: false,
+  baseLoadError: ""
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -45,6 +47,7 @@ let deadlineRefreshTimer = null;
 let deadlineLockTimer = null;
 let lastBetRoundLocked = null;
 let baseRequestPromise = null;
+let baseRetryTimer = null;
 let liveRequestPromise = null;
 let deferredBackendRender = false;
 let lastBackendVisualSignature = "";
@@ -57,6 +60,7 @@ const knockoutRounds = ["Rodada 4", "Rodada 5", "Rodada 6", "Rodada 7", "Rodada 
 const detailRequests = new Map();
 const detailRetryAfter = new Map();
 const detailsLoadedMatchIds = new Set();
+let bestThirdAssignmentCache = { signature: "", assignments: new Map() };
 
 const ROUND_LABELS = {
   "Rodada 1": "Rodada 1",
@@ -290,6 +294,9 @@ function restoreCachedBaseState() {
     }
 
     mergeMatches(payload.matches || [], "base");
+    if (payload.homeMatch) {
+      mergeMatches([payload.homeMatch], "details");
+    }
     state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
     state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
     state.roundDeadlines = Object.assign({}, payload.roundDeadlines || {});
@@ -655,6 +662,7 @@ function loadBaseState() {
 
   const requestPicksRevision = picksWriteRevision;
   const requestStartedAt = Date.now();
+  state.baseLoadError = "";
 
   baseRequestPromise = jsonp(backendActionUrl("statefast"))
     .then((payload) => {
@@ -666,7 +674,12 @@ function loadBaseState() {
       updateBackendTiming(payload, requestStartedAt);
       persistFocusedBetDraft();
 
-      const visualSignature = backendVisualSignature(payload);
+      const signaturePayload = Object.assign({}, payload, {
+        matches: payload.homeMatch
+          ? [...(payload.matches || []), payload.homeMatch]
+          : (payload.matches || [])
+      });
+      const visualSignature = backendVisualSignature(signaturePayload);
       const shouldRender = !state.loadedBackend || visualSignature !== lastBackendVisualSignature;
 
       if (
@@ -678,6 +691,9 @@ function loadBaseState() {
       }
 
       mergeMatches(payload.matches || [], "base");
+      if (payload.homeMatch) {
+        mergeMatches([payload.homeMatch], "details");
+      }
       state.resultSyncPending = Math.max(0, Number(payload.resultSyncPending || 0));
       state.detailSyncPending = Math.max(0, Number(payload.detailSyncPending || 0));
 
@@ -699,11 +715,30 @@ function loadBaseState() {
       window.setTimeout(showClosingRoundAlertIfNeeded, 0);
       return payload;
     })
+    .catch((error) => {
+      state.baseLoadError = String(error?.message || "Não foi possível carregar os dados.");
+
+      if (!state.loadedBackend && state.view === "inicio") {
+        renderHome();
+      }
+
+      scheduleBaseStateRetry();
+      throw error;
+    })
     .finally(() => {
       baseRequestPromise = null;
     });
 
   return baseRequestPromise;
+}
+
+function scheduleBaseStateRetry() {
+  if (baseRetryTimer || state.loadedBackend || document.hidden) return;
+
+  baseRetryTimer = window.setTimeout(() => {
+    baseRetryTimer = null;
+    loadBaseState().catch(() => null);
+  }, 4000);
 }
 
 function loadLiveState(force = false) {
@@ -1649,7 +1684,10 @@ function renderHomeMatchPicksSection() {
           <h2>🎯 Palpites</h2>
           <span class="kicker">Histórico</span>
         </div>
-        <div class="info-box">Carregando o último jogo finalizado...</div>
+        ${state.baseLoadError
+          ? `<div class="info-box load-error-box">Não foi possível carregar os jogos finalizados.<button type="button" class="btn retry-base-load" id="retryBaseLoad">Tentar novamente</button></div>`
+          : `<div class="info-box">Carregando o último jogo finalizado...</div>`
+        }
       </section>
     `;
   }
@@ -1754,6 +1792,15 @@ function renderHomeFinishedMatchDetails(match) {
 }
 
 function bindHomeEvents() {
+  const retryButton = $("#retryBaseLoad");
+  if (retryButton) {
+    retryButton.addEventListener("click", () => {
+      state.baseLoadError = "";
+      renderHome();
+      loadBaseState().catch(() => null);
+    });
+  }
+
   const navigation = getHomePicksMatch();
   const previous = $("#previousHomePicksGame");
   const next = $("#nextHomePicksGame");
@@ -2104,11 +2151,125 @@ function groupPositionCandidate(label) {
   return uniqueTeamNames(group?.teams || []);
 }
 
+function groupStageResolutionSignature() {
+  return DATA.matches
+    .filter((match) => groupStageRounds.includes(match.round))
+    .map((match) => {
+      const score = getPredictionScore(match);
+      return `${match.id}:${score.home ?? ""}:${score.away ?? ""}:${match.status || ""}`;
+    })
+    .join("|");
+}
+
+function qualifiedThirdPlacedRows() {
+  if (!DATA.groups.every((group) => isGroupStageComplete(group.id))) {
+    return [];
+  }
+
+  const standings = calculateGroupStandings();
+
+  return DATA.groups
+    .map((group) => {
+      const row = standings[group.id]?.[2];
+      return row ? { ...row, groupId: group.id } : null;
+    })
+    .filter(Boolean)
+    .sort((first, second) =>
+      second.pts - first.pts ||
+      second.sg - first.sg ||
+      second.gp - first.gp ||
+      first.team.localeCompare(second.team)
+    )
+    .slice(0, 8);
+}
+
+function bestThirdSlotAssignments() {
+  const signature = groupStageResolutionSignature();
+
+  if (bestThirdAssignmentCache.signature === signature) {
+    return bestThirdAssignmentCache.assignments;
+  }
+
+  const assignments = new Map();
+  const qualifiedRows = qualifiedThirdPlacedRows();
+
+  if (qualifiedRows.length !== 8) {
+    bestThirdAssignmentCache = { signature, assignments };
+    return assignments;
+  }
+
+  const qualifiedGroups = new Set(qualifiedRows.map((row) => row.groupId));
+  const slots = [];
+
+  DATA.matches
+    .filter((match) => match.round === "Rodada 4")
+    .forEach((match) => {
+      [match.team1, match.team2].forEach((label) => {
+        const parsed = String(label || "").match(/^3o melhor ([A-L](?:\/[A-L])+)$/i);
+        if (!parsed) return;
+
+        slots.push({
+          label: String(label),
+          groups: parsed[1]
+            .split("/")
+            .map((groupId) => groupId.toUpperCase())
+            .filter((groupId) => qualifiedGroups.has(groupId))
+        });
+      });
+    });
+
+  const orderedSlots = slots
+    .map((slot, originalIndex) => ({ ...slot, originalIndex }))
+    .sort((first, second) =>
+      first.groups.length - second.groups.length ||
+      first.originalIndex - second.originalIndex
+    );
+  const selected = new Map();
+  const usedGroups = new Set();
+
+  const solve = (index) => {
+    if (index >= orderedSlots.length) return true;
+
+    const slot = orderedSlots[index];
+    const available = slot.groups
+      .filter((groupId) => !usedGroups.has(groupId))
+      .sort((first, second) => first.localeCompare(second));
+
+    for (const groupId of available) {
+      selected.set(slot.label, groupId);
+      usedGroups.add(groupId);
+
+      if (solve(index + 1)) return true;
+
+      selected.delete(slot.label);
+      usedGroups.delete(groupId);
+    }
+
+    return false;
+  };
+
+  if (solve(0)) {
+    const standings = calculateGroupStandings();
+    selected.forEach((groupId, label) => {
+      const team = standings[groupId]?.[2]?.team;
+      if (isKnownTeamName(team)) assignments.set(label, team);
+    });
+  }
+
+  bestThirdAssignmentCache = { signature, assignments };
+  return assignments;
+}
+
 function bestThirdCandidates(label) {
   const match = String(label || "").match(/^3o melhor ([A-L](?:\/[A-L])+)$/i);
 
   if (!match) {
     return [];
+  }
+
+  const assignedTeam = bestThirdSlotAssignments().get(String(label));
+  if (assignedTeam) {
+    return [assignedTeam];
   }
 
   const standings = calculateGroupStandings();
@@ -2145,11 +2306,14 @@ function knockoutOutcomeTeam(sourceMatch, outcomeType) {
     return "";
   }
 
+  const homeTeam = resolvedTeamName(sourceMatch.team1);
+  const awayTeam = resolvedTeamName(sourceMatch.team2);
+
   if (outcomeType === "winner") {
-    return homeWon ? sourceMatch.team1 : sourceMatch.team2;
+    return homeWon ? homeTeam : awayTeam;
   }
 
-  return homeWon ? sourceMatch.team2 : sourceMatch.team1;
+  return homeWon ? awayTeam : homeTeam;
 }
 
 function resolveTeamCandidates(label, visited = new Set()) {
@@ -2245,26 +2409,49 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function renderOfficial() {
-  app.innerHTML = `
-    <div class="stack">
-      ${renderGroupsSection()}
-      ${renderSponsorBlock(true)}
-    </div>
-  `;
-  bindEvents();
-}
-
-function getDefaultPicksStage() {
+function getDefaultCompetitionStage() {
   return isRoundLocked("Rodada 3") ? "knockout" : "groups";
 }
 
 function getPicksStage() {
   if (state.picksStage !== "groups" && state.picksStage !== "knockout") {
-    state.picksStage = getDefaultPicksStage();
+    state.picksStage = getDefaultCompetitionStage();
   }
 
   return state.picksStage;
+}
+
+function getOfficialStage() {
+  if (state.officialStage !== "groups" && state.officialStage !== "knockout") {
+    state.officialStage = getDefaultCompetitionStage();
+  }
+
+  return state.officialStage;
+}
+
+function renderCompetitionStageSwitch(context, stage) {
+  const dataAttribute = context === "official" ? "data-official-stage" : "data-picks-stage";
+  const ariaLabel = context === "official" ? "Fase da tabela oficial" : "Fase dos palpites";
+
+  return `
+    <section class="picks-stage-switch" role="group" aria-label="${ariaLabel}">
+      <button type="button" class="picks-stage-button ${stage === "groups" ? "active" : ""}" ${dataAttribute}="groups">Grupos</button>
+      <button type="button" class="picks-stage-button ${stage === "knockout" ? "active" : ""}" ${dataAttribute}="knockout">Mata-mata</button>
+    </section>
+  `;
+}
+
+function renderOfficial() {
+  const stage = getOfficialStage();
+
+  app.innerHTML = `
+    <div class="stack">
+      ${renderCompetitionStageSwitch("official", stage)}
+      ${stage === "knockout" ? renderKnockoutBracket("official") : renderGroupsSection()}
+      ${renderSponsorBlock(true)}
+    </div>
+  `;
+  bindEvents();
 }
 
 function getPicksStageRounds() {
@@ -2285,56 +2472,142 @@ function normalizePicksRoundSelection() {
   }
 }
 
-function renderPicksStageSwitch() {
-  const stage = getPicksStage();
+function bracketTeamDisplay(match, side) {
+  const key = side === "away" ? "team2" : "team1";
+  const label = String(match?.[key] || "").trim();
+  const candidates = resolveTeamCandidates(label);
+
+  if (candidates.length === 1) {
+    return compactCountry(candidates[0]);
+  }
+
+  return `<span class="bracket-team-pending">A definir</span>`;
+}
+
+function bracketMatchScore(match) {
+  const score = getPredictionScore(match);
+
+  if (!isFinishedStatus(match) || score.home === null || score.away === null) {
+    return "";
+  }
+
+  return `<strong class="bracket-match-score">${score.home} x ${score.away}</strong>`;
+}
+
+function renderBracketMatch(matchNumber, context, selectedRound) {
+  const match = DATA.matches.find((item) => Number(item.number) === Number(matchNumber));
+
+  if (!match) return "";
+
+  const selected = selectedRound === match.round;
+  const interaction = context === "picks"
+    ? `data-knockout-round="${match.round}" role="button" tabindex="0" aria-label="Selecionar ${escapeHtml(displayRound(match.round))}"`
+    : "";
 
   return `
-    <section class="picks-stage-switch" role="group" aria-label="Fase dos palpites">
-      <button type="button" class="picks-stage-button ${stage === "groups" ? "active" : ""}" data-picks-stage="groups">Grupos</button>
-      <button type="button" class="picks-stage-button ${stage === "knockout" ? "active" : ""}" data-picks-stage="knockout">Mata-mata</button>
-    </section>
+    <div class="bracket-match ${selected ? "selected-phase" : ""} ${isFinishedStatus(match) ? "finished" : ""}" ${interaction}>
+      <div class="bracket-match-meta">
+        <span>J${String(match.number).padStart(3, "0")}</span>
+        <span>${formatDate(match.date)} · ${match.time}</span>
+      </div>
+      <div class="bracket-team-row">
+        <span>${bracketTeamDisplay(match, "home")}</span>
+        ${bracketMatchScore(match)}
+      </div>
+      <div class="bracket-team-row">
+        <span>${bracketTeamDisplay(match, "away")}</span>
+      </div>
+    </div>
   `;
 }
 
-function renderKnockoutFunnel() {
-  const stages = [
-    { round: "Rodada 4", title: "16 avos" },
-    { round: "Rodada 5", title: "Oitavas" },
-    { round: "Rodada 6", title: "Quartas" },
-    { round: "Rodada 7", title: "Semifinal" },
-    { round: "Rodada 8", title: "Final / 3º lugar" }
-  ];
+function renderBracketSlot(matchNumber, context, selectedRound, options) {
+  const { column, row, span = 1, side, source = false, centerLink = false } = options;
+  const classes = [
+    "bracket-slot",
+    `bracket-slot-${side}`,
+    source ? `bracket-source-${side}` : `bracket-merge-${side}`,
+    centerLink ? `bracket-center-link-${side}` : ""
+  ].filter(Boolean).join(" ");
 
   return `
-    <section class="card knockout-funnel-card">
-      <div class="title-row">
-        <h2>🏆 Mata-mata</h2>
-        <span class="kicker">Selecione a fase</span>
-      </div>
-      <div class="knockout-funnel-scroll">
-        <div class="knockout-funnel">
-          ${stages.map((stage, stageIndex) => {
-            const stageMatches = DATA.matches.filter((match) => match.round === stage.round);
-            const selected = state.betRound === stage.round;
+    <div class="${classes}" style="grid-column:${column};grid-row:${row} / span ${span};">
+      ${renderBracketMatch(matchNumber, context, selectedRound)}
+    </div>
+  `;
+}
 
-            return `
-              <section class="knockout-stage knockout-stage-${stageIndex + 1} ${selected ? "selected" : ""}">
-                <button type="button" class="knockout-stage-title" data-knockout-round="${stage.round}" aria-pressed="${selected ? "true" : "false"}">${stage.title}</button>
-                <div class="knockout-stage-matches">
-                  ${stageMatches.map((match) => `
-                    <button type="button" class="knockout-funnel-match" data-knockout-round="${stage.round}">
-                      <span class="knockout-funnel-meta">J${String(match.number).padStart(3, "0")} · ${formatDate(match.date)} ${match.time}</span>
-                      <span class="knockout-funnel-teams">
-                        <span>${matchTeamDisplay(match, "home")}</span>
-                        <strong>x</strong>
-                        <span>${matchTeamDisplay(match, "away")}</span>
-                      </span>
-                    </button>
-                  `).join("")}
-                </div>
-              </section>
-            `;
-          }).join("")}
+function renderBracketSide(side, context, selectedRound) {
+  const isLeft = side === "left";
+  const round32 = isLeft
+    ? [74, 77, 73, 75, 83, 84, 81, 82]
+    : [76, 78, 79, 80, 86, 88, 85, 87];
+  const round16 = isLeft ? [89, 90, 93, 94] : [91, 92, 95, 96];
+  const quarterfinals = isLeft ? [97, 98] : [99, 100];
+  const semifinal = isLeft ? 101 : 102;
+  const outerColumn = isLeft ? 1 : 4;
+  const round16Column = isLeft ? 2 : 3;
+  const quarterColumn = isLeft ? 3 : 2;
+  const semifinalColumn = isLeft ? 4 : 1;
+
+  return `
+    <div class="bracket-side bracket-side-${side}">
+      <div class="bracket-side-labels bracket-side-labels-${side}">
+        ${isLeft
+          ? `<span>16 avos</span><span>Oitavas</span><span>Quartas</span><span>Semifinal</span>`
+          : `<span>Semifinal</span><span>Quartas</span><span>Oitavas</span><span>16 avos</span>`
+        }
+      </div>
+      <div class="bracket-grid bracket-grid-${side}">
+        ${round32.map((number, index) => renderBracketSlot(number, context, selectedRound, {
+          column: outerColumn,
+          row: index + 1,
+          side,
+          source: true
+        })).join("")}
+        ${round16.map((number, index) => renderBracketSlot(number, context, selectedRound, {
+          column: round16Column,
+          row: index * 2 + 1,
+          span: 2,
+          side
+        })).join("")}
+        ${quarterfinals.map((number, index) => renderBracketSlot(number, context, selectedRound, {
+          column: quarterColumn,
+          row: index * 4 + 1,
+          span: 4,
+          side
+        })).join("")}
+        ${renderBracketSlot(semifinal, context, selectedRound, {
+          column: semifinalColumn,
+          row: 1,
+          span: 8,
+          side,
+          centerLink: true
+        })}
+      </div>
+    </div>
+  `;
+}
+
+function renderKnockoutBracket(context = "official") {
+  const selectedRound = context === "picks" ? state.betRound : "";
+
+  return `
+    <section class="card knockout-bracket-card">
+      <div class="title-row">
+        <h2>🏆 Chaveamento do mata-mata</h2>
+        <span class="kicker">Caminho até a final</span>
+      </div>
+      <div class="knockout-bracket-scroll">
+        <div class="tournament-bracket">
+          ${renderBracketSide("left", context, selectedRound)}
+          <div class="bracket-center-column">
+            <span class="bracket-center-label">Final</span>
+            ${renderBracketMatch(104, context, selectedRound)}
+            <span class="bracket-center-label bracket-third-label">3º lugar</span>
+            ${renderBracketMatch(103, context, selectedRound)}
+          </div>
+          ${renderBracketSide("right", context, selectedRound)}
         </div>
       </div>
     </section>
@@ -2344,13 +2617,10 @@ function renderKnockoutFunnel() {
 function renderPicksArea() {
   normalizePicksRoundSelection();
   lastBetRoundLocked = isRoundLocked(state.betRound);
-  const knockout = getPicksStage() === "knockout";
-
   app.innerHTML = `
     <div class="stack">
-      ${renderPicksStageSwitch()}
+      ${renderCompetitionStageSwitch("picks", getPicksStage())}
       ${renderNextRoundDeadlineSection()}
-      ${knockout ? renderKnockoutFunnel() : ""}
       ${renderBetSection()}
       ${renderPicksSection()}
       ${renderSponsorBlock(true)}
@@ -3173,16 +3443,30 @@ function bindEvents() {
     });
   });
 
-  document.querySelectorAll("[data-knockout-round]").forEach((button) => {
+  document.querySelectorAll("[data-official-stage]").forEach((button) => {
     button.addEventListener("click", () => {
-      const round = button.dataset.knockoutRound;
-      if (!knockoutRounds.includes(round)) return;
-      persistFocusedBetDraft();
-      state.betRound = round;
-      state.picksRound = round;
-      localStorage.setItem("bolao-bet-round", round);
-      localStorage.setItem("bolao-picks-round", round);
-      renderPicksArea();
+      state.officialStage = button.dataset.officialStage;
+      renderOfficial();
+    });
+  });
+
+  const selectKnockoutRound = (element) => {
+    const round = element.dataset.knockoutRound;
+    if (!knockoutRounds.includes(round)) return;
+    persistFocusedBetDraft();
+    state.betRound = round;
+    state.picksRound = round;
+    localStorage.setItem("bolao-bet-round", round);
+    localStorage.setItem("bolao-picks-round", round);
+    renderPicksArea();
+  };
+
+  document.querySelectorAll("[data-knockout-round]").forEach((element) => {
+    element.addEventListener("click", () => selectKnockoutRound(element));
+    element.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      selectKnockoutRound(element);
     });
   });
 
