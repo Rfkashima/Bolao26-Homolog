@@ -2617,9 +2617,12 @@ function renderKnockoutBracket(context = "official") {
 function renderPicksArea() {
   normalizePicksRoundSelection();
   lastBetRoundLocked = isRoundLocked(state.betRound);
+  const stage = getPicksStage();
+
   app.innerHTML = `
     <div class="stack">
-      ${renderCompetitionStageSwitch("picks", getPicksStage())}
+      ${renderCompetitionStageSwitch("picks", stage)}
+      ${stage === "knockout" ? renderKnockoutBracket("picks") : ""}
       ${renderNextRoundDeadlineSection()}
       ${renderBetSection()}
       ${renderPicksSection()}

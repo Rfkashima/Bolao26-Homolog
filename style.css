@@ -3482,3 +3482,128 @@ body.modal-open{
     overscroll-behavior-x:contain;
   }
 }
+
+
+/* Ajuste do chaveamento: encaixe no PC e rolagem apenas em telas menores. */
+@media (min-width: 900px){
+  .knockout-bracket-scroll{
+    overflow-x:hidden;
+    padding-left:0;
+    padding-right:0;
+  }
+
+  .tournament-bracket{
+    width:100%;
+    min-width:0;
+    grid-template-columns:minmax(0, 1fr) minmax(136px, 158px) minmax(0, 1fr);
+    gap:12px;
+  }
+
+  .bracket-side-labels{
+    gap:10px;
+    font-size:8px;
+  }
+
+  .bracket-grid{
+    column-gap:10px;
+    row-gap:7px;
+    grid-template-rows:repeat(8, minmax(58px, auto));
+  }
+
+  .bracket-match{
+    min-height:54px;
+    gap:3px;
+    padding:5px;
+    border-radius:8px;
+  }
+
+  .bracket-match-meta{
+    gap:3px;
+    font-size:6.5px;
+  }
+
+  .bracket-team-row{
+    gap:3px;
+    font-size:8px;
+    white-space:nowrap;
+  }
+
+  .bracket-team-row > span{
+    display:block;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+
+  .bracket-team-row .country-inline,
+  .bracket-team-row .team-inline{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+
+  .bracket-match-score{
+    font-size:8px;
+  }
+
+  .bracket-slot-left > .bracket-match::after,
+  .bracket-slot-right > .bracket-match::after,
+  .bracket-merge-left::after,
+  .bracket-merge-right::after{
+    width:6px;
+  }
+
+  .bracket-merge-left::before,
+  .bracket-merge-left::after{
+    left:-6px;
+  }
+
+  .bracket-merge-right::before,
+  .bracket-merge-right::after{
+    right:-6px;
+  }
+
+  .bracket-center-column{
+    gap:8px;
+    padding-top:22px;
+  }
+
+  .bracket-center-label{
+    font-size:9px;
+  }
+}
+
+@media (min-width: 900px) and (max-width: 1120px){
+  .tournament-bracket{
+    grid-template-columns:minmax(0, 1fr) 126px minmax(0, 1fr);
+    gap:8px;
+  }
+
+  .bracket-side-labels,
+  .bracket-grid{
+    column-gap:6px;
+  }
+
+  .bracket-match{
+    padding:4px;
+  }
+
+  .bracket-match-meta{
+    font-size:6px;
+  }
+
+  .bracket-team-row{
+    font-size:7px;
+  }
+}
+
+@media (max-width: 899px){
+  .knockout-bracket-scroll{
+    overflow-x:auto;
+  }
+
+  .tournament-bracket{
+    min-width:920px;
+  }
+}
