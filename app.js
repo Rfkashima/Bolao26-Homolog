@@ -64,6 +64,16 @@ const detailRetryAfter = new Map();
 const detailsLoadedMatchIds = new Set();
 let bestThirdAssignmentCache = { signature: "", assignments: new Map() };
 
+// As quatro combinações ainda possíveis para os oito melhores terceiros,
+// conforme a matriz oficial da FIFA (Anexo C). Os valores indicam o grupo
+// do terceiro colocado destinado a cada jogo dos 16 avos.
+const FIFA_ACTIVE_THIRD_PLACE_OPTIONS = Object.freeze({
+  BDEFIJKL: Object.freeze({ 74: "D", 77: "F", 79: "E", 80: "K", 81: "B", 82: "I", 85: "J", 87: "L" }),
+  BDEFGIKL: Object.freeze({ 74: "D", 77: "F", 79: "E", 80: "K", 81: "B", 82: "I", 85: "G", 87: "L" }),
+  BDEFGIJL: Object.freeze({ 74: "D", 77: "F", 79: "E", 80: "I", 81: "B", 82: "J", 85: "G", 87: "L" }),
+  ABDEFGIL: Object.freeze({ 74: "D", 77: "F", 79: "E", 80: "I", 81: "B", 82: "A", 85: "G", 87: "L" })
+});
+
 const ROUND_LABELS = {
   "Rodada 1": "Rodada 1",
   "Rodada 2": "Rodada 2",
@@ -869,6 +879,16 @@ function refreshAfterLiveUpdate() {
 
   if (state.view === "oficial") {
     renderOfficial();
+    return;
+  }
+
+  if (state.view === "palpites") {
+    if (isBetInputFocused()) {
+      deferredBackendRender = true;
+      return;
+    }
+
+    renderPicksArea();
   }
 }
 
@@ -2148,8 +2168,9 @@ function groupPositionCandidate(label) {
   const position = Number(match[1]);
   const groupId = match[2].toUpperCase();
   const standings = calculateGroupStandings()[groupId] || [];
+  const hasCurrentTable = standings.some((row) => Number(row.j || 0) > 0);
 
-  if (isGroupStageComplete(groupId) && standings[position - 1]) {
+  if (hasCurrentTable && standings[position - 1]) {
     return [standings[position - 1].team];
   }
 
@@ -2168,15 +2189,13 @@ function groupStageResolutionSignature() {
 }
 
 function qualifiedThirdPlacedRows() {
-  if (!DATA.groups.every((group) => isGroupStageComplete(group.id))) {
-    return [];
-  }
-
   const standings = calculateGroupStandings();
 
   return DATA.groups
     .map((group) => {
-      const row = standings[group.id]?.[2];
+      const rows = standings[group.id] || [];
+      const groupStarted = rows.some((row) => Number(row.j || 0) > 0);
+      const row = groupStarted ? rows[2] : null;
       return row ? { ...row, groupId: group.id } : null;
     })
     .filter(Boolean)
@@ -2204,63 +2223,34 @@ function bestThirdSlotAssignments() {
     return assignments;
   }
 
-  const qualifiedGroups = new Set(qualifiedRows.map((row) => row.groupId));
-  const slots = [];
+  const optionKey = qualifiedRows
+    .map((row) => row.groupId)
+    .sort((first, second) => first.localeCompare(second))
+    .join("");
+  const officialOption = FIFA_ACTIVE_THIRD_PLACE_OPTIONS[optionKey];
+
+  if (!officialOption) {
+    bestThirdAssignmentCache = { signature, assignments };
+    return assignments;
+  }
+
+  const standings = calculateGroupStandings();
 
   DATA.matches
     .filter((match) => match.round === "Rodada 4")
     .forEach((match) => {
-      [match.team1, match.team2].forEach((label) => {
-        const parsed = String(label || "").match(/^3o melhor ([A-L](?:\/[A-L])+)$/i);
-        if (!parsed) return;
+      const groupId = officialOption[Number(match.number)];
+      if (!groupId) return;
 
-        slots.push({
-          label: String(label),
-          groups: parsed[1]
-            .split("/")
-            .map((groupId) => groupId.toUpperCase())
-            .filter((groupId) => qualifiedGroups.has(groupId))
-        });
-      });
-    });
-
-  const orderedSlots = slots
-    .map((slot, originalIndex) => ({ ...slot, originalIndex }))
-    .sort((first, second) =>
-      first.groups.length - second.groups.length ||
-      first.originalIndex - second.originalIndex
-    );
-  const selected = new Map();
-  const usedGroups = new Set();
-
-  const solve = (index) => {
-    if (index >= orderedSlots.length) return true;
-
-    const slot = orderedSlots[index];
-    const available = slot.groups
-      .filter((groupId) => !usedGroups.has(groupId))
-      .sort((first, second) => first.localeCompare(second));
-
-    for (const groupId of available) {
-      selected.set(slot.label, groupId);
-      usedGroups.add(groupId);
-
-      if (solve(index + 1)) return true;
-
-      selected.delete(slot.label);
-      usedGroups.delete(groupId);
-    }
-
-    return false;
-  };
-
-  if (solve(0)) {
-    const standings = calculateGroupStandings();
-    selected.forEach((groupId, label) => {
+      const label = [match.team1, match.team2].find((value) =>
+        /^3o melhor [A-L](?:\/[A-L])+$/i.test(String(value || ""))
+      );
       const team = standings[groupId]?.[2]?.team;
-      if (isKnownTeamName(team)) assignments.set(label, team);
+
+      if (label && isKnownTeamName(team)) {
+        assignments.set(String(label), team);
+      }
     });
-  }
 
   bestThirdAssignmentCache = { signature, assignments };
   return assignments;
