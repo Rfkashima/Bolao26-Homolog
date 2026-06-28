@@ -3936,3 +3936,36 @@ body.modal-open{
     font-size:9px;
   }
 }
+
+/* Correção PC: campo de palpite imediatamente antes da bandeira e da equipe */
+@media (min-width: 900px){
+  .bracket-team-row > .bracket-team-entry{
+    display:flex;
+    flex-direction:row;
+    align-items:center;
+    justify-content:flex-start;
+    gap:4px;
+    width:100%;
+    min-width:0;
+    overflow:visible;
+    text-overflow:clip;
+    white-space:nowrap;
+  }
+
+  .bracket-team-row .bracket-pick-input{
+    order:0;
+    flex:0 0 28px;
+    width:28px;
+    min-width:28px;
+    margin:0;
+  }
+
+  .bracket-team-row .bracket-team-name{
+    order:1;
+    display:block;
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+}
