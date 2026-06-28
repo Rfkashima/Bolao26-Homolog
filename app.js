@@ -2565,11 +2565,10 @@ function bracketPickInput(match, side, locked) {
   return `
     <input
       class="bracket-pick-input"
-      type="number"
-      min="0"
-      max="99"
-      step="1"
+      type="text"
       inputmode="numeric"
+      pattern="[0-9]*"
+      maxlength="2"
       autocomplete="off"
       data-match="${match.id}"
       data-side="${dataSide}"
