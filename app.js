@@ -1,7 +1,7 @@
 const DATA = window.BOLAO_DATA;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
-const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v2-${BACKEND_ENVIRONMENT || "default"}`;
+const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v3-${BACKEND_ENVIRONMENT || "default"}`;
 const BASE_STATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
@@ -158,6 +158,7 @@ function init() {
   const siteTitle = $("#site-title");
   if (siteTitle) siteTitle.textContent = DATA.settings.title;
   bindHeaderSponsorLink();
+  sanitizeStoredMatchEvents();
   mergePicks(DATA.initialPicks || []);
   loadDrafts();
   restoreCachedBaseState();
@@ -405,7 +406,13 @@ function mergePicks(list) {
 
 function normalizeRemoteMatch(remote) {
   if (!Array.isArray(remote)) {
-    return remote || {};
+    const normalizedObject = Object.assign({}, remote || {});
+
+    if (Object.prototype.hasOwnProperty.call(normalizedObject, "events")) {
+      normalizedObject.events = goalOnlyEvents(normalizedObject.events);
+    }
+
+    return normalizedObject;
   }
 
   const normalized = {
@@ -418,7 +425,7 @@ function normalizeRemoteMatch(remote) {
   if (remote.length > 4) normalized.elapsed = remote[4];
   if (remote.length > 5) normalized.homeScorers = remote[5];
   if (remote.length > 6) normalized.awayScorers = remote[6];
-  if (remote.length > 7) normalized.events = remote[7];
+  if (remote.length > 7) normalized.events = goalOnlyEvents(remote[7]);
   if (remote.length > 8) normalized.injuryTime = remote[8];
   if (remote.length > 9) normalized.source = remote[9];
   if (remote.length > 10) normalized.sourceStatus = remote[10];
@@ -426,6 +433,58 @@ function normalizeRemoteMatch(remote) {
   if (remote.length > 12) normalized.statistics = remote[12];
 
   return normalized;
+}
+
+function sanitizeStoredMatchEvents() {
+  DATA.matches.forEach((match) => {
+    if (!Object.prototype.hasOwnProperty.call(match, "events")) return;
+    match.events = goalOnlyEvents(match.events);
+  });
+}
+
+function goalOnlyEvents(value) {
+  const seen = new Set();
+
+  return normalizeGoalList(value, "")
+    .filter((event) => isGoalEvent(event))
+    .map((event) => Object.assign({}, event, {
+      kind: "goal",
+      icon: "⚽"
+    }))
+    .filter((event) => {
+      const key = [
+        event.side || "",
+        normalizeEventTeamName(event.team),
+        cleanGoalMinute(event.minute),
+        cleanGoalPlayer(event.player || ""),
+        String(event.goalType || "")
+      ].join("|");
+
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function isGoalEvent(event) {
+  if (!event) return false;
+
+  const explicitKind = String(event.kind || "").trim().toLowerCase();
+  const description = [event.type, event.label]
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  const saysGoal = /(?:^|\s)(?:goal|gol|scoring play)(?:$|\s)/.test(description) &&
+    !/(?:disallowed|anulado|cancelado|missed|saved|defendido)/.test(description);
+
+  if (explicitKind === "goal" || saysGoal) return true;
+
+  if (["card", "substitution", "penalty", "var", "other"].includes(explicitKind)) {
+    return false;
+  }
+
+  return inferEventKind(event) === "goal";
 }
 
 function matchHasScore(match) {
@@ -472,7 +531,7 @@ function meaningfulDetailValues(value) {
 }
 
 function matchDetailsWeight(match) {
-  const events = Array.isArray(match?.events) ? match.events.length : 0;
+  const events = goalOnlyEvents(match?.events).length;
   const statistics = meaningfulDetailValues(match?.statistics);
   return events * 10000 + statistics;
 }
@@ -558,7 +617,7 @@ function mergeMatches(list, origin = "base") {
 
     const hasEventsField = Object.prototype.hasOwnProperty.call(remote, "events");
     const hasStatisticsField = Object.prototype.hasOwnProperty.call(remote, "statistics");
-    const incomingEvents = hasEventsField && Array.isArray(remote.events) ? remote.events : [];
+    const incomingEvents = hasEventsField ? goalOnlyEvents(remote.events) : [];
     const incomingStatistics = hasStatisticsField && remote.statistics && typeof remote.statistics === "object"
       ? remote.statistics
       : {};
@@ -569,10 +628,9 @@ function mergeMatches(list, origin = "base") {
     }
 
     if (hasEventsField) {
-      const currentEvents = Array.isArray(match.events) ? match.events : [];
-      if (incomingEvents.length >= currentEvents.length) {
-        match.events = incomingEvents;
-      }
+      match.events = incomingEvents;
+    } else if (Object.prototype.hasOwnProperty.call(match, "events")) {
+      match.events = goalOnlyEvents(match.events);
     }
 
     if (hasStatisticsField) {
@@ -1787,7 +1845,7 @@ function renderHomeMatchPicksSection() {
 function renderHomeFinishedMatchDetails(match) {
   if (!isFinishedStatus(match)) {
     if (isPastMatchAwaitingResult(match)) {
-      return `<div class="info-box historical-result-pending">Sincronizando o placar e os eventos deste jogo finalizado...</div>`;
+      return `<div class="info-box historical-result-pending">Sincronizando o placar e os gols deste jogo finalizado...</div>`;
     }
 
     return "";
@@ -1804,10 +1862,10 @@ function renderHomeFinishedMatchDetails(match) {
   return `
     <div class="home-finished-match-details">
       ${detailsPending
-        ? `<div class="info-box historical-result-pending">Sincronizando os eventos e as estatísticas deste jogo finalizado...</div>`
+        ? `<div class="info-box historical-result-pending">Sincronizando os gols e as estatísticas deste jogo finalizado...</div>`
         : ""}
       ${events.length ? `
-        <div class="finished-events-title">Eventos</div>
+        <div class="finished-events-title">Gols</div>
         <div class="live-event-list finished-goals-aligned">
           ${events.map((event) => liveEventRow(event, match)).join("")}
         </div>
@@ -2060,7 +2118,7 @@ function renderLastFinishedMatch(match) {
         </div>
 
         ${events.length ? `
-          <div class="finished-events-title">Eventos</div>
+          <div class="finished-events-title">Gols</div>
           <div class="live-event-list finished-goals-aligned">
             ${events.map((event) => liveEventRow(event, match)).join("")}
           </div>
@@ -2825,7 +2883,7 @@ function liveMatchDetails(match) {
   const eventBlock = events.length
     ? `
       <div class="live-match-events-block">
-        <div class="finished-events-title">Eventos</div>
+        <div class="finished-events-title">Gols</div>
         <div class="live-event-list">
           ${events.map((event) => liveEventRow(event, match)).join('')}
         </div>
@@ -2837,43 +2895,25 @@ function liveMatchDetails(match) {
 }
 
 function liveMatchEvents(match) {
-  const events = normalizeGoalList(match && match.events, "")
+  return goalOnlyEvents(match && match.events)
     .filter((event) => eventBelongsToMatch(event, match))
     .map((event) => {
-      const kind = String(event.kind || inferEventKind(event)).toLowerCase();
       const side = event.side === "away" || event.side === "home"
         ? event.side
         : eventTeamSide(event.team, match);
 
       return Object.assign({}, event, {
-        kind,
+        kind: "goal",
         side,
         team: event.team || (side === "away" ? match.team2 : match.team1),
-        icon: event.icon || eventIcon(kind, event.card),
+        icon: "⚽",
         label: event.label || event.type || ""
       });
     })
-    .filter((event) => ["goal", "card", "substitution", "penalty", "var"].includes(event.kind))
     .sort((first, second) => {
       return goalMinuteSortValue(first.minute) - goalMinuteSortValue(second.minute) ||
         Number(first.sequence || 0) - Number(second.sequence || 0);
     });
-
-  const seen = new Set();
-  return events.filter((event) => {
-    const key = [
-      event.kind,
-      event.side,
-      cleanGoalMinute(event.minute),
-      cleanGoalPlayer(event.player || event.playerIn || ""),
-      event.card || "",
-      event.sequence || ""
-    ].join("|");
-
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
 }
 
 function eventBelongsToMatch(event, match) {
