@@ -7,7 +7,7 @@ const RESULT_POINTS = Number.isFinite(Number(DATA.settings.resultPoints))
   : 1;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
-const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v6-${BACKEND_ENVIRONMENT || "default"}`;
+const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v8-${BACKEND_ENVIRONMENT || "default"}`;
 const BASE_STATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
@@ -311,11 +311,8 @@ function restoreCachedBaseState() {
       return;
     }
 
-    if (Array.isArray(payload.picks)) {
-      state.picks = {};
-      mergePicks(payload.picks);
-    }
-
+    // Palpites não são restaurados do cache local. O ranking só é exibido
+    // depois que os dados atuais forem confirmados pelo backend.
     mergeMatches(payload.matches || [], "base");
     if (payload.homeMatch) {
       mergeMatches([payload.homeMatch], "details");
@@ -329,7 +326,7 @@ function restoreCachedBaseState() {
       state.serverTimeOffsetMs = cachedServerTime - cachedAt;
     }
 
-    state.loadedBackend = true;
+    // Mantém o backend como não carregado para impedir ranking baseado em cache antigo.
   } catch (_) {
     localStorage.removeItem(BASE_STATE_CACHE_KEY);
   }
@@ -337,9 +334,12 @@ function restoreCachedBaseState() {
 
 function cacheBaseState(payload) {
   try {
+    const cachePayload = Object.assign({}, payload);
+    delete cachePayload.picks;
+
     localStorage.setItem(BASE_STATE_CACHE_KEY, JSON.stringify({
       cachedAt: Date.now(),
-      payload
+      payload: cachePayload
     }));
   } catch (_) {
     // O cache local é apenas uma aceleração e não pode impedir o carregamento normal.
@@ -4184,55 +4184,47 @@ function matchEndedAfterExtraTime(match) {
     text.includes("prorrogacao");
 }
 
+function numericScorePair(match, fieldPairs) {
+  for (const fields of fieldPairs) {
+    const home = numericMatchValue(match, [fields[0]]);
+    const away = numericMatchValue(match, [fields[1]]);
+
+    if (home !== null && away !== null) {
+      return { home, away };
+    }
+  }
+
+  return { home: null, away: null };
+}
+
 function getPredictionScore(match) {
-  const regulationScore = {
-    home: numericMatchValue(match, ["score1"]),
-    away: numericMatchValue(match, ["score2"])
-  };
+  const regulationScore = numericScorePair(match, [
+    ["score1", "score2"]
+  ]);
 
   if (!match || groupStageRounds.includes(match.round)) {
     return regulationScore;
   }
 
   if (matchEndedOnPenalties(match)) {
-    return {
-      home: numericMatchValue(match, [
-        "scoreBeforePenalties1",
-        "regulationPlusExtraTime1",
-        "scoreAfterExtraTime1",
-        "betScore1",
-        "score1"
-      ]),
-      away: numericMatchValue(match, [
-        "scoreBeforePenalties2",
-        "regulationPlusExtraTime2",
-        "scoreAfterExtraTime2",
-        "betScore2",
-        "score2"
-      ])
-    };
+    return numericScorePair(match, [
+      ["scoreBeforePenalties1", "scoreBeforePenalties2"],
+      ["regulationPlusExtraTime1", "regulationPlusExtraTime2"],
+      ["scoreAfterExtraTime1", "scoreAfterExtraTime2"],
+      ["betScore1", "betScore2"],
+      ["score1", "score2"]
+    ]);
   }
 
   if (matchEndedAfterExtraTime(match)) {
-    return {
-      home: numericMatchValue(match, [
-        "regulationPlusExtraTime1",
-        "scoreAfterExtraTime1",
-        "betScore1",
-        "score1"
-      ]),
-      away: numericMatchValue(match, [
-        "regulationPlusExtraTime2",
-        "scoreAfterExtraTime2",
-        "betScore2",
-        "score2"
-      ])
-    };
+    return numericScorePair(match, [
+      ["regulationPlusExtraTime1", "regulationPlusExtraTime2"],
+      ["scoreAfterExtraTime1", "scoreAfterExtraTime2"],
+      ["betScore1", "betScore2"],
+      ["score1", "score2"]
+    ]);
   }
 
-  // Partida de mata-mata encerrada no tempo normal: o placar exibido é também
-  // o placar válido para a pontuação. Campos auxiliares antigos não podem
-  // substituir esse resultado.
   return regulationScore;
 }
 
