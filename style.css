@@ -3117,6 +3117,61 @@ iframe{
   box-shadow:0 8px 22px rgba(0,76,255,.28);
 }
 
+.knockout-funnel{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:12px;
+  width:100%;
+}
+
+.knockout-stage{
+  display:grid;
+  gap:8px;
+}
+
+.knockout-stage-1{ width:100%; }
+.knockout-stage-2{ width:88%; }
+.knockout-stage-3{ width:76%; }
+.knockout-stage-4{ width:64%; }
+.knockout-stage-5{ width:52%; }
+
+.knockout-stage-title{
+  width:100%;
+  min-height:42px;
+  border:1px solid rgba(0,167,255,.42);
+  border-radius:12px;
+  background:#050c19;
+  color:#f8fbff;
+  font-weight:1000;
+}
+
+.knockout-stage.selected .knockout-stage-title{
+  background:linear-gradient(135deg, #00a7ff, #004cff);
+}
+
+.knockout-stage-matches{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:8px;
+}
+
+.knockout-stage-5 .knockout-stage-matches{
+  grid-template-columns:1fr;
+}
+
+.knockout-funnel-match{
+  display:grid;
+  gap:6px;
+  width:100%;
+  border:1px solid rgba(0,167,255,.32);
+  border-radius:12px;
+  padding:9px;
+  background:#050c19;
+  color:#f8fbff;
+  text-align:left;
+}
+
 /* Chave visual do mata-mata */
 .knockout-bracket-card{
   overflow:hidden;

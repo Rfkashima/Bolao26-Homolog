@@ -7,7 +7,7 @@ const RESULT_POINTS = Number.isFinite(Number(DATA.settings.resultPoints))
   : 1;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
-const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v8-${BACKEND_ENVIRONMENT || "default"}`;
+const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v9-${BACKEND_ENVIRONMENT || "default"}`;
 const BASE_STATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
@@ -636,9 +636,15 @@ function mergeMatches(list, origin = "base") {
     const currentPriority = Number(match._mergePriority || 0);
     const currentTimestamp = remoteTimestamp(match);
     const incomingTimestamp = remoteTimestamp(remote);
-    const protectsCurrent = (currentFinished && !incomingFinished) ||
+    const authoritativeReset = origin === "base" &&
+      currentPriority <= priority &&
+      !incomingFinished &&
+      !matchHasScore(remote);
+    const protectsCurrent = !authoritativeReset && (
+      (currentFinished && !incomingFinished) ||
       (currentFinished && incomingFinished && currentPriority > priority && currentTimestamp > 0 && currentTimestamp >= incomingTimestamp) ||
-      (!currentFinished && !incomingFinished && currentPriority > priority && currentTimestamp >= incomingTimestamp);
+      (!currentFinished && !incomingFinished && currentPriority > priority && currentTimestamp >= incomingTimestamp)
+    );
 
     if (!protectsCurrent) {
       if (remote.score1 !== undefined) {
@@ -2180,46 +2186,6 @@ function getLastFinishedMatch() {
     .sort((first, second) => compareFinishedMatches(second, first))[0] || null;
 }
 
-function renderLastFinishedMatch(match) {
-  const events = liveMatchEvents(match);
-
-  return `
-    <section class="card last-match-section">
-      <div class="title-row">
-        <h2>✅ Último jogo</h2>
-        <span class="finished-pill">Jogo encerrado</span>
-      </div>
-
-      <div class="last-match-card">
-        <div class="last-match-meta">
-          <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-          <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
-        </div>
-
-        <div class="last-match-line">
-          <div class="last-team">${country(match.team1)}</div>
-          <strong class="last-score">${matchResultInline(match)}</strong>
-          <div class="last-team last-team-right">${country(match.team2)}</div>
-        </div>
-
-        ${events.length ? `
-          <div class="finished-events-title">Gols</div>
-          <div class="live-event-list finished-goals-aligned">
-            ${events.map((event) => liveEventRow(event, match)).join("")}
-          </div>
-        ` : ""}
-
-        ${liveMatchStatistics(match)}
-
-        <div class="last-match-footer">
-          <span>${escapeHtml(match.venue || "")}</span>
-          <span>${escapeHtml(match.source || 'ESPN')}</span>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
 function getUpcomingGamesLimit() {
   const currentRound = getCurrentRoundName();
 
@@ -2287,18 +2253,6 @@ function isKnownTeamName(name) {
 
 function uniqueTeamNames(names) {
   return [...new Set((names || []).filter((name) => isKnownTeamName(name)))];
-}
-
-function isGroupStageComplete(groupId) {
-  const groupName = `Grupo ${groupId}`;
-  const groupMatches = DATA.matches.filter((match) => {
-    return match.group === groupName && groupStageRounds.includes(match.round);
-  });
-
-  return groupMatches.length > 0 && groupMatches.every((match) => {
-    const score = getPredictionScore(match);
-    return isFinishedStatus(match) || (score.home !== null && score.away !== null && makeDate(match).getTime() < currentCompetitionTimeMs());
-  });
 }
 
 function groupPositionCandidate(label) {
