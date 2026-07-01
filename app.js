@@ -1,7 +1,7 @@
 const DATA = window.BOLAO_DATA;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
-const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v3-${BACKEND_ENVIRONMENT || "default"}`;
+const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v4-${BACKEND_ENVIRONMENT || "default"}`;
 const BASE_STATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
@@ -443,27 +443,62 @@ function sanitizeStoredMatchEvents() {
 }
 
 function goalOnlyEvents(value) {
-  const seen = new Set();
+  const deduplicated = [];
+  const indexByKey = new Map();
 
-  return normalizeGoalList(value, "")
+  normalizeGoalList(value, "")
     .filter((event) => isGoalEvent(event))
     .map((event) => Object.assign({}, event, {
       kind: "goal",
       icon: "⚽"
     }))
-    .filter((event) => {
-      const key = [
-        event.side || "",
-        normalizeEventTeamName(event.team),
-        cleanGoalMinute(event.minute),
-        cleanGoalPlayer(event.player || ""),
-        String(event.goalType || "")
-      ].join("|");
+    .forEach((event) => {
+      const minute = cleanGoalMinute(event.minute);
+      const player = goalEventPlayerKey(event.player || "");
+      const team = normalizeEventTeamName(event.team);
+      const side = String(event.side || "").trim().toLowerCase();
+      const fallbackLabel = goalEventPlayerKey(event.label || event.type || "goal");
+      const key = player
+        ? `${minute}|${player}`
+        : `${minute}|${side}|${team}|${fallbackLabel}`;
+      const existingIndex = indexByKey.get(key);
 
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+      if (existingIndex === undefined) {
+        indexByKey.set(key, deduplicated.length);
+        deduplicated.push(event);
+        return;
+      }
+
+      if (goalEventDetailWeight(event) > goalEventDetailWeight(deduplicated[existingIndex])) {
+        deduplicated[existingIndex] = event;
+      }
     });
+
+  return deduplicated;
+}
+
+function goalEventPlayerKey(value) {
+  return cleanGoalPlayer(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s*\((?:og|gc|own goal|gol contra|p|penalty|penalti)\)\s*$/i, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function goalEventDetailWeight(event) {
+  const goalType = String(event && event.goalType || "").toLowerCase();
+  let weight = 0;
+
+  if (goalType === "own_goal") weight += 20;
+  if (goalType === "penalty") weight += 10;
+  if (event && event.assist) weight += 4;
+  if (event && event.team) weight += 2;
+  if (event && event.side) weight += 1;
+
+  return weight;
 }
 
 function isGoalEvent(event) {
@@ -484,7 +519,7 @@ function isGoalEvent(event) {
     return false;
   }
 
-  return inferEventKind(event) === "goal";
+  return false;
 }
 
 function matchHasScore(match) {
@@ -557,21 +592,31 @@ function mergeMatches(list, origin = "base") {
       elapsed: match.elapsed,
       sourceStatus: match.sourceStatus,
       sourceUpdatedAt: match.sourceUpdatedAt,
+      sourceDate: match.sourceDate,
+      sourceTime: match.sourceTime,
+      sourceDateIso: match.sourceDateIso,
+      sourceState: match.sourceState,
       finalizedAt: match.finalizedAt,
       detailsSyncedAt: match.detailsSyncedAt,
       events: match.events,
       statistics: match.statistics
     });
     const sourceStatus = String(remote.sourceStatus || "").toLowerCase();
+    const sourceState = String(remote.sourceState || "").toLowerCase();
     const status = String(remote.status || "").toLowerCase();
     const elapsed = String(remote.elapsed || "").toLowerCase();
-    const notStarted = status.includes("pendente") ||
+    const notStarted = sourceState === "pre" ||
+      status.includes("pendente") ||
       status.includes("scheduled") ||
       status.includes("timed") ||
+      status.includes("atrasado") ||
+      status.includes("adiado") ||
       sourceStatus.includes("not_started") ||
       sourceStatus.includes("not started") ||
       sourceStatus.includes("scheduled") ||
       sourceStatus.includes("timed") ||
+      sourceStatus.includes("delayed") ||
+      sourceStatus.includes("postponed") ||
       elapsed === "notstarted" ||
       elapsed === "not_started" ||
       elapsed === "scheduled" ||
@@ -603,6 +648,10 @@ function mergeMatches(list, origin = "base") {
       if (remote.source !== undefined) match.source = remote.source;
       if (remote.sourceStatus !== undefined) match.sourceStatus = remote.sourceStatus;
       if (remote.sourceUpdatedAt !== undefined) match.sourceUpdatedAt = remote.sourceUpdatedAt;
+      if (remote.sourceDate !== undefined && remote.sourceDate !== "") match.sourceDate = remote.sourceDate;
+      if (remote.sourceTime !== undefined && remote.sourceTime !== "") match.sourceTime = remote.sourceTime;
+      if (remote.sourceDateIso !== undefined && remote.sourceDateIso !== "") match.sourceDateIso = remote.sourceDateIso;
+      if (remote.sourceState !== undefined && remote.sourceState !== "") match.sourceState = remote.sourceState;
       match._mergePriority = Math.max(currentPriority, priority);
     }
 
@@ -667,6 +716,10 @@ function mergeMatches(list, origin = "base") {
       elapsed: match.elapsed,
       sourceStatus: match.sourceStatus,
       sourceUpdatedAt: match.sourceUpdatedAt,
+      sourceDate: match.sourceDate,
+      sourceTime: match.sourceTime,
+      sourceDateIso: match.sourceDateIso,
+      sourceState: match.sourceState,
       finalizedAt: match.finalizedAt,
       detailsSyncedAt: match.detailsSyncedAt,
       events: match.events,
@@ -970,6 +1023,10 @@ function backendVisualSignature(payload) {
         events: match.events || [],
         statistics: match.statistics || {},
         sourceUpdatedAt: match.sourceUpdatedAt || "",
+        sourceDate: match.sourceDate || "",
+        sourceTime: match.sourceTime || "",
+        sourceDateIso: match.sourceDateIso || "",
+        sourceState: match.sourceState || "",
         finalizedAt: match.finalizedAt || "",
         detailsSyncedAt: match.detailsSyncedAt || "",
         espnId: match.espnId || "",
@@ -1644,10 +1701,8 @@ function showClosingRoundAlertIfNeeded() {
 }
 
 function getNextScheduledMatch() {
-  const now = currentCompetitionTimeMs();
-
   return DATA.matches
-    .filter((match) => !isLiveMatch(match) && !isFinishedStatus(match) && makeDate(match).getTime() > now)
+    .filter((match) => isFutureScheduledMatch(match))
     .sort((a, b) => makeDate(a) - makeDate(b))[0] || null;
 }
 
@@ -1658,9 +1713,10 @@ function getFeaturedPendingMatches() {
       if (!match || isLiveMatch(match) || isFinishedStatus(match)) return false;
 
       const kickoff = makeDate(match).getTime();
-      return Number.isFinite(kickoff) &&
-        kickoff >= now &&
-        kickoff <= now + UPCOMING_FEATURE_WINDOW_MS;
+      return Number.isFinite(kickoff) && (
+        (kickoff >= now && kickoff <= now + UPCOMING_FEATURE_WINDOW_MS) ||
+        isDelayedScheduledMatch(match)
+      );
     })
     .sort((first, second) => {
       return makeDate(first).getTime() - makeDate(second).getTime() ||
@@ -1777,7 +1833,18 @@ function renderHomeMatchPicksSection() {
   }
 
   const isLive = isLiveMatch(match);
-  const isUpcoming = !isLive && isFutureScheduledMatch(match);
+  const isFinished = isFinishedStatus(match);
+  const isDelayed = isDelayedScheduledMatch(match);
+  const isUpcoming = !isLive && !isFinished && isFutureScheduledMatch(match);
+  const statusLabel = isLive
+    ? "Jogo ao vivo"
+    : isFinished
+      ? "Jogo finalizado"
+      : isDelayed
+        ? "Jogo atrasado"
+        : isUpcoming
+          ? "Próximo jogo"
+          : "Aguardando atualização";
   const roundClosed = isRoundLocked(match.round);
   const activeIndex = navigation.index;
   const total = navigation.matches.length;
@@ -1786,7 +1853,7 @@ function renderHomeMatchPicksSection() {
     <section class="card home-match-picks-section">
       <div class="title-row home-picks-title-row">
         <h2>🎯 Palpites</h2>
-        <span class="kicker">${isLive ? "Jogo ao vivo" : isUpcoming ? "Próximo jogo" : "Jogo finalizado"}</span>
+        <span class="kicker">${statusLabel}</span>
       </div>
 
       <div class="home-picks-navigation" aria-label="Navegação entre os jogos">
@@ -1814,7 +1881,7 @@ function renderHomeMatchPicksSection() {
       <div class="pick-card">
         <div class="pick-top">
           <span>${match.group} · Jogo ${match.number}</span>
-          <span>${formatDate(match.date)} · ${match.time}</span>
+          <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
         </div>
 
         ${matchLine(match)}
@@ -1844,8 +1911,12 @@ function renderHomeMatchPicksSection() {
 
 function renderHomeFinishedMatchDetails(match) {
   if (!isFinishedStatus(match)) {
+    if (isDelayedScheduledMatch(match)) {
+      return `<div class="info-box historical-result-pending">Partida atrasada. Aguardando o novo horário informado pela ESPN.</div>`;
+    }
+
     if (isPastMatchAwaitingResult(match)) {
-      return `<div class="info-box historical-result-pending">Sincronizando o placar e os gols deste jogo finalizado...</div>`;
+      return `<div class="info-box historical-result-pending">Aguardando atualização da ESPN sobre o início ou encerramento deste jogo.</div>`;
     }
 
     return "";
@@ -1955,22 +2026,26 @@ function renderLiveSection() {
 
 function renderLiveMatchPanel(match, totalMatches) {
   const live = isLiveMatch(match);
+  const delayed = isDelayedScheduledMatch(match);
   const interrupted = isInterruptedMatch(match);
   const kickoff = makeDate(match).getTime();
-  const kicker = live
-    ? interrupted
-      ? "Jogo interrompido"
-      : totalMatches > 1
-        ? `Jogo ${match.number} em andamento`
-        : "Atualização ESPN"
-    : kickoff <= currentCompetitionTimeMs()
-      ? "Aguardando atualização ESPN"
-      : "Começa em até 30 minutos";
+  const kicker = delayed
+    ? "Aguardando novo horário"
+    : live
+      ? interrupted
+        ? "Jogo interrompido"
+        : totalMatches > 1
+          ? `Jogo ${match.number} em andamento`
+          : "Atualização ESPN"
+      : kickoff <= currentCompetitionTimeMs()
+        ? "Aguardando atualização ESPN"
+        : "Começa em até 30 minutos";
+  const title = delayed ? "⏳ Jogo atrasado" : "🔴 Ao vivo";
 
   return `
     <section class="card live-section live-match-panel ${live ? "" : "upcoming-featured-section"}" data-match-id="${escapeHtml(match.id)}">
       <div class="title-row">
-        <h2>🔴 Ao vivo</h2>
+        <h2>${title}</h2>
         <span class="kicker">${escapeHtml(kicker)}</span>
       </div>
 
@@ -1986,7 +2061,7 @@ function liveGameCard(match, includePicks) {
     <div class="live-game-card ${live ? "" : "upcoming-featured-card"}" data-match-id="${escapeHtml(match.id)}">
       <div class="game-top">
         <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-        <span>${formatDate(match.date)} · ${match.time}</span>
+        <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
       </div>
 
       ${live ? liveMatchLine(match) : matchLine(match)}
@@ -2108,7 +2183,7 @@ function renderLastFinishedMatch(match) {
       <div class="last-match-card">
         <div class="last-match-meta">
           <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-          <span>${formatDate(match.date)} · ${match.time}</span>
+          <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
         </div>
 
         <div class="last-match-line">
@@ -2438,6 +2513,10 @@ function compactPossibleTeams(label) {
 }
 
 function compactGameCard(match) {
+  const delayedLabel = isDelayedScheduledMatch(match)
+    ? `<span class="compact-game-delay">Atrasado</span>`
+    : "";
+
   return `
     <div class="compact-game" data-match-id="${escapeHtml(match.id)}">
       <div class="compact-game-main">
@@ -2446,7 +2525,7 @@ function compactGameCard(match) {
         <span>${compactPossibleTeams(match.team2)}</span>
       </div>
       <div class="compact-game-meta">
-        <span>${formatDate(match.date)} · ${match.time}</span>
+        <span>${formatMatchDate(match)} · ${formatMatchTime(match)} ${delayedLabel}</span>
         <span>${compactVenue(match.venue)}</span>
       </div>
     </div>
@@ -2618,7 +2697,7 @@ function renderBracketMatch(matchNumber, context, selectedRound) {
     <div class="bracket-match ${selected ? "selected-phase" : ""} ${isFinishedStatus(match) ? "finished" : ""}" ${interaction}>
       <div class="bracket-match-meta">
         <span>J${String(match.number).padStart(3, "0")}</span>
-        <span>${formatBracketDate(match.date)} · ${match.time}</span>
+        <span>${formatBracketDate(matchDisplayDate(match))} · ${formatMatchTime(match)}</span>
       </div>
       ${renderBracketTeamRow(match, "home", context, selectedRound)}
       ${renderBracketTeamRow(match, "away", context, selectedRound)}
@@ -2870,7 +2949,7 @@ function groupGameCard(match) {
     <div class="game-card">
       <div class="game-top">
         <span>${displayRound(match.round)} · Jogo ${match.number}</span>
-        <span>${formatDate(match.date)} · ${match.time}</span>
+        <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
       </div>
       ${matchLine(match)}
     </div>
@@ -3399,7 +3478,7 @@ function betRow(match, playerId, locked) {
     <div class="bet-row">
       <div class="bet-meta">
         <span>${match.group} · Jogo ${match.number}</span>
-        <span>${formatDate(match.date)} · ${match.time}</span>
+        <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
       </div>
 
       <div class="bet-line">
@@ -3465,7 +3544,7 @@ function renderPicksSection() {
               <div class="pick-card">
                 <div class="pick-top">
                   <span>${match.group} · Jogo ${match.number}</span>
-                  <span>${formatDate(match.date)} · ${match.time}</span>
+                  <span>${formatMatchDate(match)} · ${formatMatchTime(match)}</span>
                 </div>
                 ${matchLine(match)}
                 <div class="player-picks">
@@ -4076,7 +4155,7 @@ function isRoundLocked(round) {
 }
 
 function isLiveMatch(match) {
-  if (!match || isFinishedStatus(match)) {
+  if (!match || isFinishedStatus(match) || isDelayedScheduledMatch(match)) {
     return false;
   }
 
@@ -4138,6 +4217,27 @@ function hasExplicitLiveState(match) {
   ].includes(elapsed);
 }
 
+function isDelayedScheduledMatch(match) {
+  if (!match || isFinishedStatus(match)) {
+    return false;
+  }
+
+  const sourceState = String(match.sourceState || "").trim().toLowerCase();
+  const text = [
+    match.status,
+    match.sourceStatus,
+    match.elapsed
+  ].join(" ").toLowerCase();
+
+  const delayed = text.includes("delayed") ||
+    text.includes("weather") ||
+    text.includes("adiado") ||
+    text.includes("atrasado") ||
+    text.includes("postponed");
+
+  return delayed && sourceState !== "in";
+}
+
 function hasFreshLiveSource(match) {
   const updatedAt = new Date(match && match.sourceUpdatedAt || '').getTime();
 
@@ -4156,11 +4256,39 @@ function isInterruptedMatch(match) {
   return text.includes('interrompido') ||
     text.includes('suspended') ||
     text.includes('delayed') ||
-    text.includes('weather');
+    text.includes('weather') ||
+    text.includes('postponed') ||
+    text.includes('adiado') ||
+    text.includes('atrasado');
+}
+
+function matchDisplayDate(match) {
+  const sourceDate = String(match && match.sourceDate || "").trim();
+  const sourceTime = String(match && match.sourceTime || "").trim();
+
+  return sourceDate && sourceTime
+    ? sourceDate
+    : String(match && match.date || "");
+}
+
+function formatMatchDate(match) {
+  return formatDate(matchDisplayDate(match));
+}
+
+function formatMatchTime(match) {
+  const sourceDate = String(match && match.sourceDate || "").trim();
+  const sourceTime = String(match && match.sourceTime || "").trim();
+
+  return sourceDate && sourceTime
+    ? sourceTime
+    : String(match && match.time || "");
 }
 
 function makeDate(match) {
-  return new Date(`${match.date}T${match.time}:00`);
+  const date = matchDisplayDate(match);
+  const time = formatMatchTime(match);
+
+  return new Date(`${date}T${time}:00`);
 }
 
 function country(name) {
@@ -4287,21 +4415,31 @@ function isFutureScheduledMatch(match) {
     return false;
   }
 
-  const kickoff = makeDate(match).getTime();
-  if (!Number.isFinite(kickoff) || kickoff <= currentCompetitionTimeMs()) {
-    return false;
-  }
-
   const hasScore = match.score1 !== null &&
     match.score1 !== undefined &&
     match.score2 !== null &&
     match.score2 !== undefined;
 
-  return !hasScore;
+  if (hasScore) {
+    return false;
+  }
+
+  if (isDelayedScheduledMatch(match)) {
+    return true;
+  }
+
+  const kickoff = makeDate(match).getTime();
+  return Number.isFinite(kickoff) && kickoff > currentCompetitionTimeMs();
 }
 
 function isPastMatchAwaitingResult(match) {
-  if (!match || isLiveMatch(match) || isFinishedStatus(match) || matchHasScore(match)) {
+  if (
+    !match ||
+    isLiveMatch(match) ||
+    isFinishedStatus(match) ||
+    isDelayedScheduledMatch(match) ||
+    matchHasScore(match)
+  ) {
     return false;
   }
 

@@ -2,7 +2,6 @@ window.BOLAO_DATA = {
   "settings": {
     "title": "Bolão Copa 2026",
     "environment": "homologation",
-    "simulatedNow": "2026-07-04T08:00:00-03:00",
     "exactScorePoints": 3,
     "resultPoints": 1,
     "entryFee": 20.0,
