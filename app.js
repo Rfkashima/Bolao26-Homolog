@@ -1,7 +1,13 @@
 const DATA = window.BOLAO_DATA;
+const EXACT_SCORE_POINTS = Number.isFinite(Number(DATA.settings.exactScorePoints))
+  ? Number(DATA.settings.exactScorePoints)
+  : 3;
+const RESULT_POINTS = Number.isFinite(Number(DATA.settings.resultPoints))
+  ? Number(DATA.settings.resultPoints)
+  : 1;
 const BACKEND_ENVIRONMENT = String(DATA.settings.environment || "").trim();
 const DRAFT_KEY = "bolao-copa-2026-drafts-v1";
-const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v4-${BACKEND_ENVIRONMENT || "default"}`;
+const BASE_STATE_CACHE_KEY = `bolao-base-state-cache-v6-${BACKEND_ENVIRONMENT || "default"}`;
 const BASE_STATE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKEND_TIMEOUT_MS = 25000;
 const LIVE_REFRESH_MS = 15000;
@@ -257,8 +263,12 @@ function hasPotentiallyActiveMatch() {
   });
 }
 
+function hasDelayedMatches() {
+  return DATA.matches.some((match) => isDelayedScheduledMatch(match));
+}
+
 function shouldUseLiveRefresh() {
-  return hasLiveMatches() || hasPotentiallyActiveMatch();
+  return hasLiveMatches() || hasPotentiallyActiveMatch() || hasDelayedMatches();
 }
 
 function hasRecentFinishedMatch() {
@@ -3745,6 +3755,77 @@ function setSaveButtonBusy(busy) {
   saveButton.textContent = busy ? "Salvando..." : "Salvar";
 }
 
+function normalizedPickResponseItem(pick) {
+  if (!pick) return null;
+
+  const compact = Array.isArray(pick);
+  const playerId = compact ? pick[0] : (pick.playerId || pick.p);
+  const matchId = compact ? pick[1] : (pick.matchId || pick.m);
+  const rawG1 = compact ? pick[2] : (pick.g1 ?? pick.goals1 ?? pick.a);
+  const rawG2 = compact ? pick[3] : (pick.g2 ?? pick.goals2 ?? pick.b);
+  const g1 = Number(rawG1);
+  const g2 = Number(rawG2);
+
+  if (!playerId || !matchId || !Number.isInteger(g1) || !Number.isInteger(g2)) {
+    return null;
+  }
+
+  return {
+    playerId: String(playerId),
+    matchId: String(matchId),
+    g1,
+    g2,
+    submittedAt: compact ? pick[4] : (pick.submittedAt || pick.createdAt || ""),
+    updatedAt: compact ? pick[5] : (pick.updatedAt || "")
+  };
+}
+
+function validateSavedRoundResponse(response, playerId, round, expectedPicks) {
+  const confirmed = Array.isArray(response?.picks)
+    ? response.picks.map(normalizedPickResponseItem).filter(Boolean)
+    : [];
+  const expectedByMatch = new Map(expectedPicks.map((pick) => [pick.matchId, pick]));
+  const confirmedByMatch = new Map();
+
+  confirmed.forEach((pick) => {
+    if (pick.playerId !== playerId || !expectedByMatch.has(pick.matchId)) return;
+
+    if (confirmedByMatch.has(pick.matchId)) {
+      throw new Error(`O Google Sheets retornou o jogo ${pick.matchId} duplicado.`);
+    }
+
+    confirmedByMatch.set(pick.matchId, pick);
+  });
+
+  const missing = [];
+  const divergent = [];
+
+  expectedPicks.forEach((expected) => {
+    const saved = confirmedByMatch.get(expected.matchId);
+
+    if (!saved) {
+      missing.push(expected.matchId);
+      return;
+    }
+
+    if (saved.g1 !== expected.g1 || saved.g2 !== expected.g2) {
+      divergent.push(`${expected.matchId} (${saved.g1}x${saved.g2})`);
+    }
+  });
+
+  if (missing.length || divergent.length || confirmedByMatch.size !== expectedPicks.length) {
+    const details = [];
+    if (missing.length) details.push(`não confirmados: ${missing.join(", ")}`);
+    if (divergent.length) details.push(`placares divergentes: ${divergent.join(", ")}`);
+
+    throw new Error(
+      `O Google Sheets não confirmou os ${expectedPicks.length} jogos de ${displayRound(round)}${details.length ? ` (${details.join("; ")})` : ""}.`
+    );
+  }
+
+  return expectedPicks.map((expected) => confirmedByMatch.get(expected.matchId));
+}
+
 function saveRoundPicks(round) {
   if (state.saveInFlight) {
     return;
@@ -3766,14 +3847,51 @@ function saveRoundPicks(round) {
   }
 
   const matches = DATA.matches.filter((match) => match.round === round);
+  const expectedCount = Number({
+    "Rodada 1": 24,
+    "Rodada 2": 24,
+    "Rodada 3": 24,
+    "Rodada 4": 16,
+    "Rodada 5": 8,
+    "Rodada 6": 4,
+    "Rodada 7": 2,
+    "Rodada 8": 2
+  }[round] || 0);
+
+  if (!expectedCount || matches.length !== expectedCount) {
+    alert(`A configuração de ${displayRound(round)} está incompleta: encontrados ${matches.length} de ${expectedCount || "?"} jogos.`);
+    return;
+  }
+
+  const inputMap = new Map();
+  const duplicateInputs = [];
+
+  document.querySelectorAll('input[data-match][data-side]').forEach((input) => {
+    const matchId = String(input.dataset.match || "");
+    const side = String(input.dataset.side || "");
+
+    if (!matches.some((match) => match.id === matchId) || !["g1", "g2"].includes(side)) {
+      return;
+    }
+
+    const key = `${matchId}|${side}`;
+    if (inputMap.has(key)) duplicateInputs.push(key);
+    inputMap.set(key, input);
+  });
+
+  if (duplicateInputs.length) {
+    alert(`Foram encontrados campos duplicados nos jogos: ${duplicateInputs.join(", ")}. Atualize a página antes de salvar.`);
+    return;
+  }
+
   const newPicks = [];
 
   for (const match of matches) {
-    const g1 = document.querySelector(`input[data-match="${match.id}"][data-side="g1"]`)?.value ?? "";
-    const g2 = document.querySelector(`input[data-match="${match.id}"][data-side="g2"]`)?.value ?? "";
+    const g1 = inputMap.get(`${match.id}|g1`)?.value ?? "";
+    const g2 = inputMap.get(`${match.id}|g2`)?.value ?? "";
 
     if (g1 === "" || g2 === "") {
-      alert("Preencha todos os jogos da rodada antes de salvar.");
+      alert(`Preencha o jogo ${match.id} antes de salvar.`);
       return;
     }
 
@@ -3801,6 +3919,11 @@ function saveRoundPicks(round) {
     });
   }
 
+  if (newPicks.length !== expectedCount) {
+    alert(`O envio foi bloqueado porque contém ${newPicks.length} de ${expectedCount} jogos.`);
+    return;
+  }
+
   setDraftRoundPicks(state.selectedPlayer, round, newPicks);
   mergePicks(newPicks);
 
@@ -3820,13 +3943,21 @@ function saveRoundPicks(round) {
     }
 
     validateBackendEnvironment(response);
-    mergePicks(response.picks || newPicks);
+    const confirmedPicks = validateSavedRoundResponse(
+      response,
+      state.selectedPlayer,
+      round,
+      newPicks
+    );
+
+    mergePicks(confirmedPicks);
     clearDraftRound(state.selectedPlayer, round);
+    localStorage.removeItem(BASE_STATE_CACHE_KEY);
     lastBackendVisualSignature = "";
-    alert("Palpites salvos.");
+    alert(`Palpites salvos e conferidos: ${confirmedPicks.length} jogos.`);
     render();
   }).catch((error) => {
-    alert(`Os palpites continuam protegidos neste aparelho, mas não foram enviados ao Google Sheets: ${error.message || "erro no backend"}`);
+    alert(`Os palpites continuam protegidos neste aparelho, mas o salvamento não foi confirmado: ${error.message || "erro no backend"}`);
   }).finally(() => {
     state.saveInFlight = false;
     setSaveButtonBusy(false);
@@ -3851,13 +3982,13 @@ function playerPickResultBadge(pick, match) {
   if (scored.exact) {
     return live
       ? `<span class="player-pick-hit-badge exact">Placar exato parcial</span>`
-      : `<span class="player-pick-hit-badge exact">Placar exato · +${DATA.settings.exactScorePoints}</span>`;
+      : `<span class="player-pick-hit-badge exact">Placar exato · +${scored.points}</span>`;
   }
 
   if (scored.result) {
     return live
       ? `<span class="player-pick-hit-badge result">Resultado parcial</span>`
-      : `<span class="player-pick-hit-badge result">Resultado · +${DATA.settings.resultPoints}</span>`;
+      : `<span class="player-pick-hit-badge result">Resultado · +${scored.points}</span>`;
   }
 
   return "";
@@ -3927,13 +4058,18 @@ function rankingMovement(movement) {
 
 function calculateRanking() {
   const currentRanking = buildRanking();
-  const latestMatch = getLastRankedMatch();
+  const liveMatchIds = DATA.matches
+    .filter((match) => isLiveMatch(match) && hasPredictionScore(match))
+    .map((match) => match.id);
+  const comparisonMatchIds = liveMatchIds.length
+    ? liveMatchIds
+    : [getLastRankedMatch()?.id].filter(Boolean);
 
-  if (!latestMatch) {
+  if (!comparisonMatchIds.length) {
     return currentRanking.map((row) => Object.assign({}, row, { movement: 0 }));
   }
 
-  const previousRanking = buildRanking(latestMatch.id);
+  const previousRanking = buildRanking(comparisonMatchIds);
   const previousPositions = new Map(
     previousRanking.map((row, index) => [row.id, index + 1])
   );
@@ -3948,18 +4084,20 @@ function calculateRanking() {
   });
 }
 
-function buildRanking(excludedMatchId = "") {
+function buildRanking(excludedMatchIds = []) {
+  const excludedIds = new Set(
+    Array.isArray(excludedMatchIds)
+      ? excludedMatchIds.map(String)
+      : [String(excludedMatchIds || "")].filter(Boolean)
+  );
+
   return DATA.players.map((player) => {
     let points = 0;
     let exacts = 0;
     let results = 0;
 
     DATA.matches.forEach((match) => {
-      if (!isFinishedStatus(match) || !matchHasScore(match)) {
-        return;
-      }
-
-      if (excludedMatchId && match.id === excludedMatchId) {
+      if (!isRankingScorableMatch(match) || excludedIds.has(String(match.id))) {
         return;
       }
 
@@ -3985,10 +4123,7 @@ function buildRanking(excludedMatchId = "") {
 
 function getLastRankedMatch() {
   return DATA.matches
-    .filter((match) => {
-      const score = getPredictionScore(match);
-      return isFinishedStatus(match) && score.home !== null && score.away !== null;
-    })
+    .filter((match) => isFinishedStatus(match) && hasPredictionScore(match))
     .sort((first, second) => compareFinishedMatches(second, first))[0] || null;
 }
 
@@ -4007,49 +4142,136 @@ function numericMatchValue(match, fields) {
   return null;
 }
 
+function matchStatusText(match) {
+  return [
+    match?.status,
+    match?.sourceStatus,
+    match?.elapsed
+  ]
+    .join(" ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function matchEndedOnPenalties(match) {
+  const text = matchStatusText(match);
+  const homePenalties = numericMatchValue(match, [
+    "penaltyScore1",
+    "penalties1",
+    "shootoutScore1"
+  ]);
+  const awayPenalties = numericMatchValue(match, [
+    "penaltyScore2",
+    "penalties2",
+    "shootoutScore2"
+  ]);
+
+  return text.includes("penalt") ||
+    text.includes("shootout") ||
+    (homePenalties !== null && awayPenalties !== null);
+}
+
+function matchEndedAfterExtraTime(match) {
+  const text = matchStatusText(match);
+  return matchEndedOnPenalties(match) ||
+    /(?:^|\s)aet(?:$|\s)/.test(text) ||
+    text.includes("after extra time") ||
+    text.includes("extra time") ||
+    text.includes("prorrogacao");
+}
+
 function getPredictionScore(match) {
-  const knockout = match && !groupStageRounds.includes(match.round);
-  const homeFields = knockout
-    ? [
-        "scoreAfterExtraTime1",
+  const regulationScore = {
+    home: numericMatchValue(match, ["score1"]),
+    away: numericMatchValue(match, ["score2"])
+  };
+
+  if (!match || groupStageRounds.includes(match.round)) {
+    return regulationScore;
+  }
+
+  if (matchEndedOnPenalties(match)) {
+    return {
+      home: numericMatchValue(match, [
         "scoreBeforePenalties1",
         "regulationPlusExtraTime1",
+        "scoreAfterExtraTime1",
         "betScore1",
         "score1"
-      ]
-    : ["score1"];
-  const awayFields = knockout
-    ? [
-        "scoreAfterExtraTime2",
+      ]),
+      away: numericMatchValue(match, [
         "scoreBeforePenalties2",
         "regulationPlusExtraTime2",
+        "scoreAfterExtraTime2",
         "betScore2",
         "score2"
-      ]
-    : ["score2"];
+      ])
+    };
+  }
 
-  return {
-    home: numericMatchValue(match, homeFields),
-    away: numericMatchValue(match, awayFields)
-  };
+  if (matchEndedAfterExtraTime(match)) {
+    return {
+      home: numericMatchValue(match, [
+        "regulationPlusExtraTime1",
+        "scoreAfterExtraTime1",
+        "betScore1",
+        "score1"
+      ]),
+      away: numericMatchValue(match, [
+        "regulationPlusExtraTime2",
+        "scoreAfterExtraTime2",
+        "betScore2",
+        "score2"
+      ])
+    };
+  }
+
+  // Partida de mata-mata encerrada no tempo normal: o placar exibido é também
+  // o placar válido para a pontuação. Campos auxiliares antigos não podem
+  // substituir esse resultado.
+  return regulationScore;
+}
+
+function hasPredictionScore(match) {
+  const score = getPredictionScore(match);
+  return score.home !== null && score.away !== null;
+}
+
+function isRankingScorableMatch(match) {
+  return Boolean(match) &&
+    !isDelayedScheduledMatch(match) &&
+    (isFinishedStatus(match) || isLiveMatch(match)) &&
+    hasPredictionScore(match);
 }
 
 function scorePick(pick, match) {
   const score = getPredictionScore(match);
 
   if (!pick ||
+    isDelayedScheduledMatch(match) ||
     isFutureScheduledMatch(match) ||
     score.home === null ||
     score.away === null) {
     return { points: 0, exact: false, result: false };
   }
 
-  if (pick.g1 === score.home && pick.g2 === score.away) {
-    return { points: 3, exact: true, result: true };
+  const pickHome = Number(pick.g1);
+  const pickAway = Number(pick.g2);
+
+  if (!Number.isFinite(pickHome) || !Number.isFinite(pickAway)) {
+    return { points: 0, exact: false, result: false };
   }
 
-  if (outcome(pick.g1, pick.g2) === outcome(score.home, score.away)) {
-    return { points: 1, exact: false, result: true };
+  if (pickHome === score.home && pickAway === score.away) {
+    return { points: EXACT_SCORE_POINTS, exact: true, result: true };
+  }
+
+  if (outcome(pickHome, pickAway) === outcome(score.home, score.away)) {
+    return { points: RESULT_POINTS, exact: false, result: true };
   }
 
   return { points: 0, exact: false, result: false };
